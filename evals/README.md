@@ -73,8 +73,8 @@ eval moves.
 
 ### Run it
 ```bash
-# from the repo root (needs nfl_mcp importable, e.g. after `pip install -e .`)
-python -m evals.backtest.backtest --seasons 2024 --start-week 5 --min-trailing 5
+# from the repo root (needs nfl_mcp importable, e.g. after `uv sync`)
+uv run python -m evals.backtest.backtest --seasons 2024 --start-week 5 --min-trailing 5
 
 # options
 --seasons 2023,2024     # combine seasons
@@ -196,7 +196,7 @@ Checks auto-fall-back to the most recent season that has published data, so they
 stay green year-round.
 
 ```bash
-python -m evals.contracts.checks     # exits non-zero iff a CRITICAL check fails
+uv run python -m evals.contracts.checks     # exits non-zero iff a CRITICAL check fails
 ```
 
 Runs daily via `.github/workflows/contracts.yml` (+ manual dispatch). A **critical**
@@ -223,7 +223,8 @@ tool *descriptions* are what drive that choice, so this guards them.
 
 ```bash
 export ANTHROPIC_API_KEY=...            # required for the live run
-python -m evals.agent.run --model claude-sonnet-5 --threshold 0.8
+uv sync --group agent-evals
+uv run python -m evals.agent.run --model claude-sonnet-5 --threshold 0.8
 # no key -> skips gracefully (exit 0)
 ```
 

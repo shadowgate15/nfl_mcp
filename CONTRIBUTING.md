@@ -4,22 +4,20 @@ Thanks for helping improve the NFL MCP Server!
 
 ## Development setup
 
-- Python 3.9+ (CI runs the suite on 3.11 and 3.12)
+- Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) (CI runs the suite on 3.11, 3.12, and 3.13)
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt -r requirements-dev.txt
-pip install -e .
+uv sync --group dev
 ```
 
 ## Running things
 
 ```bash
 # Tests (with coverage)
-pytest tests/ -q --cov=nfl_mcp --cov-report=term-missing
+uv run pytest tests/ -q --cov=nfl_mcp --cov-report=term-missing
 
 # Server (HTTP transport on :9000, health at /health)
-python -m nfl_mcp.server
+uv run python -m nfl_mcp.server
 
 # Docker
 docker build -t nfl-mcp .

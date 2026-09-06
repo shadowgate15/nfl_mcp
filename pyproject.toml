@@ -33,13 +33,25 @@ dependencies = [
     "pydantic>=2.13.4,<2.14",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "httpx>=0.28.1,<1",
     "pytest-cov>=7.1.0",
+    "ruff>=0.16.5",
+    "mypy>=2.3.1",
 ]
+agent-evals = [
+    "anthropic",
+]
+
+[tool.uv]
+# fastmcp is still a beta (4.0.0bN); scope prerelease resolution to just that
+# package so uv doesn't also pick alpha/dev releases of unrelated deps. The
+# httpx<1 / pydantic<2.14 upper bounds above are the guardrail for everything
+# else.
+prerelease-package = { fastmcp = "allow" }
 
 [project.urls]
 Homepage = "https://github.com/gtonic/nfl_mcp"

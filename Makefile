@@ -10,25 +10,24 @@ PORT ?= 9000
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
-install: ## Install project dependencies
-	pip install -r requirements.txt
-	pip install -e ".[dev]"
+install: ## Install project dependencies (requires uv: https://docs.astral.sh/uv/)
+	uv sync --group dev
 
 test: ## Run unit tests
-	pytest tests/ -v --cov=nfl_mcp --cov-report=term-missing
+	uv run pytest tests/ -v --cov=nfl_mcp --cov-report=term-missing
 
 test-quick: ## Run tests without coverage
-	pytest tests/ -v
+	uv run pytest tests/ -v
 
 lint: ## Run code linting (if available)
-	python -m py_compile nfl_mcp/server.py
-	python -m py_compile tests/test_server.py
+	uv run python -m py_compile nfl_mcp/server.py
+	uv run python -m py_compile tests/test_server.py
 
 run: ## Run the server locally
-	python -m nfl_mcp.server
+	uv run python -m nfl_mcp.server
 
 run-dev: ## Run the server in development mode with auto-reload
-	python nfl_mcp/server.py
+	uv run python nfl_mcp/server.py
 
 build: ## Build Docker image
 	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .

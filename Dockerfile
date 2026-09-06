@@ -15,7 +15,9 @@
 FROM python:3.13-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /app
 
@@ -25,29 +27,23 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Build into a self-contained virtualenv we can copy wholesale to the runtime
-# stage. The venv's interpreter symlinks resolve identically there because the
-# runtime stage uses the same python:3.13-slim base.
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# Obtain the uv binary from Astral's official image layer -- no curl, no pip
+# bootstrap, keeping this stage's install surface minimal.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
-# Upgrade the bundled build tooling (wheel/setuptools) too -- the base image
-# ships older versions flagged by scanners (e.g. wheel GHSA-8rrh-rw8j-w5fx).
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+# Install pinned, reproducible dependencies straight from the committed
+# lockfile into a self-contained virtualenv we can copy wholesale to the
+# runtime stage, before the rest of the source is copied in (dependencies
+# change far less often than app code, so this layer caches well). --locked
+# fails the build if uv.lock is out of sync with pyproject.toml instead of
+# silently re-resolving. --no-dev excludes the dev/agent-evals dependency
+# groups from the shipped image.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-install-project
 
-# Install pinned, reproducible dependencies. requirements.lock is generated via:
-#   uv pip compile requirements.txt --python-version 3.13 --prerelease=allow --output-file requirements.lock
-# (--prerelease=allow is required while FastMCP 4 is a beta: fastmcp==4.0.0b1 pins
-#  a pre-release fastmcp-slim. The httpx<1 / pydantic<2.14 bounds in
-#  requirements.txt keep uv from resolving their dev/alpha releases under that
-#  flag. Plain `pip install -r requirements.lock` below needs no --pre — exact
-#  pins of a pre-release are always honored.)
-COPY requirements.lock .
-RUN pip install --no-cache-dir -r requirements.lock
-
-# Install the package itself into the venv.
+# Install the project itself into the venv.
 COPY . .
-RUN pip install --no-cache-dir -e .
+RUN uv sync --locked --no-dev
 
 # ---- Runtime stage ---------------------------------------------------------
 FROM python:3.13-slim AS runtime

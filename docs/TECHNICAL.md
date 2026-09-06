@@ -8,7 +8,8 @@ for the full per-tool reference see [AGENT.md](../AGENT.md).
 
 ## Requirements
 
-- **Python 3.11+** (the package uses `datetime.UTC`/`tomllib`; CI tests 3.11 & 3.12)
+- **Python 3.11+** (the package uses `datetime.UTC`/`tomllib`; CI tests 3.11, 3.12 & 3.13)
+- **[uv](https://docs.astral.sh/uv/getting-started/installation/)** (the only supported way to install dependencies — resolution, locking, and installation all go through it)
 - **Docker** (optional, for containerized deployment)
 - **make** (already present on most dev machines and CI images; used for the Makefile shortcuts)
 
@@ -17,13 +18,13 @@ for the full per-tool reference see [AGENT.md](../AGENT.md).
 ```bash
 git clone https://github.com/gtonic/nfl_mcp.git
 cd nfl_mcp
-pip install -r requirements.txt
-pip install -e ".[dev]"
+uv sync --group dev
 ```
 
-For reproducible installs, `requirements.lock` pins every transitive dependency
-(generated with `uv pip compile requirements.txt --python-version 3.13`); the
-Docker image installs from it.
+`pyproject.toml` is the single source of truth for dependencies; `uv.lock`
+(committed) pins every transitive dependency for reproducible installs. Local
+dev, CI, and the Docker image all resolve to the same locked graph via
+`uv sync`/`uv sync --locked`.
 
 ## Running the server
 
@@ -33,7 +34,7 @@ entrypoint module `nfl_mcp.server`). A non-MCP health endpoint lives at
 
 ```bash
 # Local
-python -m nfl_mcp.server
+uv run python -m nfl_mcp.server
 
 # Docker — published image (CI publishes to GHCR on push to main and on tags)
 docker run --rm -p 9000:9000 ghcr.io/gtonic/nfl_mcp:latest
@@ -185,7 +186,7 @@ nfl_mcp/
 ├── tests/                  # ~850 tests (unit; live tests gated behind --run-live)
 ├── evals/                  # 3-layer eval suite (see below)
 ├── docs/                   # This guide, DRAFT_DAY.md, research notes
-├── Dockerfile · Makefile · pyproject.toml · requirements.lock
+├── Dockerfile · Makefile · pyproject.toml · uv.lock
 ```
 
 Design principles:
@@ -273,10 +274,10 @@ authenticating reverse proxy. Full details and reporting policy in
 ## Development
 
 ```bash
-pytest -q                       # full unit suite (live API tests skipped)
-pytest -q --run-live            # also run tests that hit real external APIs
-pytest -q --cov=nfl_mcp --cov-report=term-missing
-ruff check .                    # lint gate
+uv run pytest -q                       # full unit suite (live API tests skipped)
+uv run pytest -q --run-live            # also run tests that hit real external APIs
+uv run pytest -q --cov=nfl_mcp --cov-report=term-missing
+uv run ruff check .                    # lint gate
 ```
 
 Common Makefile targets: `make install`, `make test`, `make run`, `make build`,
