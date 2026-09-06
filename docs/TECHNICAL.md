@@ -10,7 +10,7 @@ for the full per-tool reference see [AGENT.md](../AGENT.md).
 
 - **Python 3.11+** (the package uses `datetime.UTC`/`tomllib`; CI tests 3.11 & 3.12)
 - **Docker** (optional, for containerized deployment)
-- **[Task](https://taskfile.dev/installation/)** (optional, for the Taskfile shortcuts)
+- **make** (already present on most dev machines and CI images; used for the Makefile shortcuts)
 
 ## Installation
 
@@ -43,10 +43,10 @@ docker run --rm -p 9000:9000 ghcr.io/gtonic/nfl_mcp:latest
 docker build -t nfl-mcp-server .
 docker run --rm -p 9000:9000 nfl-mcp-server
 
-# Taskfile
-task run          # run locally
-task run-docker   # run in Docker
-task all          # full pipeline
+# Makefile
+make run          # run locally
+make run-docker   # run in Docker
+make all          # full pipeline
 ```
 
 The SQLite database is only a **cache** (athletes, schedules, enrichment). It
@@ -185,7 +185,7 @@ nfl_mcp/
 ├── tests/                  # ~850 tests (unit; live tests gated behind --run-live)
 ├── evals/                  # 3-layer eval suite (see below)
 ├── docs/                   # This guide, DRAFT_DAY.md, research notes
-├── Dockerfile · Taskfile.yml · pyproject.toml · requirements.lock
+├── Dockerfile · Makefile · pyproject.toml · requirements.lock
 ```
 
 Design principles:
@@ -279,5 +279,5 @@ pytest -q --cov=nfl_mcp --cov-report=term-missing
 ruff check .                    # lint gate
 ```
 
-Common Taskfile targets: `task install`, `task test`, `task run`, `task build`,
-`task run-docker`, `task health-check`, `task clean` (`task --list` for all).
+Common Makefile targets: `make install`, `make test`, `make run`, `make build`,
+`make run-docker`, `make health-check`, `make clean` (`make help` or bare `make` for all).
