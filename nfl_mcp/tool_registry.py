@@ -16,6 +16,7 @@ from . import (
     cbs_fantasy_tools,
     coaching_tools,
     draft_tools,
+    espn_fantasy_tools,
     faab_tools,
     handcuff_tools,
     lineup_optimizer_tools,
@@ -79,6 +80,9 @@ def get_all_tools() -> list[Callable]:
         get_cbs_player_news,
         get_cbs_projections,
         get_cbs_expert_picks,
+
+        # ESPN Fantasy Tools
+        get_espn_league,
 
         # Web Tools
         crawl_url,
@@ -395,6 +399,27 @@ async def get_cbs_expert_picks(week: int | None = None) -> dict:
     except Exception:
         week_i = None
     return await cbs_fantasy_tools.get_cbs_expert_picks(week=week_i)
+
+
+# =============================================================================
+# ESPN FANTASY TOOLS
+# =============================================================================
+
+@timing_decorator("get_espn_league", tool_type="espn_fantasy")
+async def get_espn_league(league_id: str, year: int | None = None) -> dict:
+    """Get an ESPN fantasy league's settings and metadata.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {league, success, error?, error_type?}
+    Example: get_espn_league(league_id="1234", year=2018)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        return await espn_fantasy_tools.get_espn_league(league_id, year)
+    except ValueError as e:
+        return {"league": None, "success": False, "error": f"Invalid league_id: {e!s}"}
 
 
 # =============================================================================
