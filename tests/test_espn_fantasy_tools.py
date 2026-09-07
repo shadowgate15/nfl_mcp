@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
+from nfl_mcp.errors import ErrorType
 from nfl_mcp.espn_errors import classify_espn_auth_error
 from nfl_mcp.espn_fantasy_tools import handle_espn_auth_errors
 
@@ -34,7 +35,7 @@ class TestHandleEspnAuthErrors:
 
         wrapped.assert_not_called()
         assert result["success"] is False
-        assert result["error_type"] == "espn_credentials_not_configured"
+        assert result["error_type"] == ErrorType.ESPN_CREDENTIALS_NOT_CONFIGURED
         assert "not configured" in result["error"].lower()
 
     @pytest.mark.asyncio
@@ -53,7 +54,7 @@ class TestHandleEspnAuthErrors:
 
         wrapped.assert_not_called()
         assert result["success"] is False
-        assert result["error_type"] == "espn_credentials_not_configured"
+        assert result["error_type"] == ErrorType.ESPN_CREDENTIALS_NOT_CONFIGURED
 
     @pytest.mark.asyncio
     async def test_401_delegates_to_classifier(self, monkeypatch):
@@ -71,7 +72,7 @@ class TestHandleEspnAuthErrors:
         result = await get_league()
 
         assert result["success"] is False
-        assert result["error_type"] == expected.category
+        assert result["error_type"] == ErrorType.ESPN_EXPIRED_COOKIES
         assert result["error"] == expected.message
 
     @pytest.mark.asyncio
@@ -90,7 +91,7 @@ class TestHandleEspnAuthErrors:
         result = await get_league()
 
         assert result["success"] is False
-        assert result["error_type"] == expected.category
+        assert result["error_type"] == ErrorType.ESPN_POSSIBLE_AUTH_ISSUE
         assert result["error"] == expected.message
 
     @pytest.mark.asyncio

@@ -30,6 +30,9 @@ class ErrorType:
     # hitting those paths raised AttributeError (surfaced by the mypy pass).
     API_ERROR = "api_error"
     NOT_FOUND = "not_found_error"
+    ESPN_CREDENTIALS_NOT_CONFIGURED = "espn_credentials_not_configured_error"
+    ESPN_EXPIRED_COOKIES = "espn_expired_cookies_error"
+    ESPN_POSSIBLE_AUTH_ISSUE = "espn_possible_auth_issue_error"
 
 
 def create_error_response(
