@@ -16,6 +16,7 @@ from . import (
     cbs_fantasy_tools,
     coaching_tools,
     draft_tools,
+    espn_fantasy_tools,
     faab_tools,
     handcuff_tools,
     lineup_optimizer_tools,
@@ -79,6 +80,9 @@ def get_all_tools() -> list[Callable]:
         get_cbs_player_news,
         get_cbs_projections,
         get_cbs_expert_picks,
+
+        # ESPN Fantasy Tools
+        get_espn_player_news,
 
         # Web Tools
         crawl_url,
@@ -395,6 +399,30 @@ async def get_cbs_expert_picks(week: int | None = None) -> dict:
     except Exception:
         week_i = None
     return await cbs_fantasy_tools.get_cbs_expert_picks(week=week_i)
+
+
+# =============================================================================
+# ESPN FANTASY TOOLS
+# =============================================================================
+
+@timing_decorator("get_espn_player_news", tool_type="espn_fantasy")
+async def get_espn_player_news(player_id: int | None = None, limit: int | None = None) -> dict:
+    """Fetch the latest ESPN fantasy player news, optionally filtered to one player.
+
+    Parameters:
+        player_id (int, optional): ESPN player ID to filter news to a single player.
+        limit (int, optional): Max number of news items to return.
+    Returns: {news: [...], total_news, success, error?}
+    Example: get_espn_player_news(player_id=3139477, limit=10)
+    """
+    try:
+        if player_id is not None:
+            player_id = validate_numeric_input(player_id, min_val=1, required=False)
+        if limit is not None:
+            limit = validate_numeric_input(limit, min_val=1, max_val=100, required=False)
+    except ValueError as e:
+        return {"news": [], "total_news": 0, "success": False, "error": f"Invalid input: {e!s}"}
+    return await espn_fantasy_tools.get_espn_player_news(player_id=player_id, limit=limit)
 
 
 # =============================================================================
