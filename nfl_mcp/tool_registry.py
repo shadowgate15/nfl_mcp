@@ -83,6 +83,7 @@ def get_all_tools() -> list[Callable]:
 
         # ESPN Fantasy Tools
         get_espn_league,
+        get_espn_player_news,
 
         # Web Tools
         crawl_url,
@@ -420,6 +421,26 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         return await espn_fantasy_tools.get_espn_league(league_id, year)
     except ValueError as e:
         return {"league": None, "success": False, "error": f"Invalid league_id: {e!s}"}
+
+
+@timing_decorator("get_espn_player_news", tool_type="espn_fantasy")
+async def get_espn_player_news(player_id: int | None = None, limit: int | None = None) -> dict:
+    """Fetch the latest ESPN fantasy player news, optionally filtered to one player.
+
+    Parameters:
+        player_id (int, optional): ESPN player ID to filter news to a single player.
+        limit (int, optional): Max number of news items to return.
+    Returns: {news: [...], total_news, success, error?}
+    Example: get_espn_player_news(player_id=3139477, limit=10)
+    """
+    try:
+        if player_id is not None:
+            player_id = validate_numeric_input(player_id, min_val=1, required=False)
+        if limit is not None:
+            limit = validate_numeric_input(limit, min_val=1, max_val=100, required=False)
+    except ValueError as e:
+        return {"news": [], "total_news": 0, "success": False, "error": f"Invalid input: {e!s}"}
+    return await espn_fantasy_tools.get_espn_player_news(player_id=player_id, limit=limit)
 
 
 # =============================================================================

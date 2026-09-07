@@ -18,6 +18,7 @@ add the rest of the catalog (rosters, standings, matchups, draft,
 transactions, free agents) as siblings in this module.
 """
 
+import logging
 import os
 from collections.abc import Callable
 from datetime import datetime
@@ -34,6 +35,13 @@ from .errors import (
     handle_http_errors,
 )
 from .espn_errors import classify_espn_auth_error
+
+logger = logging.getLogger(__name__)
+
+# Player news lives on ESPN's core-sports host (site.api.espn.com), not the
+# fantasy host (lm-api-reads.fantasy.espn.com) every other tool in this module
+# targets — confirmed cookie-free and league-independent (ESPN_FANTASY_ENDPOINT_CATALOG.md §8).
+_PLAYER_NEWS_URL = "https://site.api.espn.com/apis/fantasy/v3/games/ffl/news/players"
 
 # espn_errors.py deliberately has no dependency on errors.py's ErrorType, so
 # it can be called standalone by evals/contracts/checks.py (ADR 0003). This
@@ -192,3 +200,66 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         )
 
     return create_success_response({"league": league_data})
+
+
+@handle_http_errors(
+    default_data={"news": [], "total_news": 0},
+    operation_name="fetching ESPN player news",
+)
+async def get_espn_player_news(player_id: int | None = None, limit: int | None = None) -> dict:
+    """
+    Fetch the latest ESPN fantasy player news, optionally filtered to one player.
+
+    Unlike every other tool in this module, this endpoint lives on ESPN's
+    core-sports host (`site.api.espn.com`) rather than the fantasy host, is not
+    league-scoped, and needs no `ESPN_S2`/`ESPN_SWID` cookies at all — so it
+    deliberately does not stack `@handle_espn_auth_errors` (ADR 0004).
+
+    Args:
+        player_id: Optional ESPN player ID to filter news to a single player.
+        limit: Optional max number of news items to return.
+
+    Returns:
+        A dictionary containing:
+        - news: List of news feed items, as ESPN returns them
+        - total_news: Number of news items returned
+        - success: Whether the request was successful
+        - error: Error message (if any)
+        - error_type: Type of error (if any)
+    """
+    params: dict[str, int] = {}
+    if player_id is not None:
+        params["playerId"] = player_id
+    if limit is not None:
+        params["limit"] = limit
+
+    headers = get_http_headers("espn_player_news")
+
+    async with create_http_client() as client:
+        response = await client.get(_PLAYER_NEWS_URL, headers=headers, params=params)
+
+        # Same site.api.espn.com host as nfl_tools.get_nfl_news, which hits this
+        # exact WAF quirk: a branded User-Agent is intermittently rejected with
+        # 403, and retrying with httpx's default User-Agent is accepted.
+        if response.status_code == 403:
+            logger.warning(
+                "ESPN player news returned 403 for branded User-Agent; "
+                "retrying with default User-Agent"
+            )
+            response = await client.get(_PLAYER_NEWS_URL, params=params)
+
+        response.raise_for_status()
+
+        data = response.json()
+        feed = data.get("news", {}).get("feed", [])
+
+        # The catalog's reference client only documents `playerId` as a request
+        # param (§8) — `limit` is sent best-effort but not confirmed honored
+        # server-side, so it's also enforced here to guarantee the contract.
+        if limit is not None:
+            feed = feed[:limit]
+
+        return create_success_response({
+            "news": feed,
+            "total_news": len(feed),
+        })
