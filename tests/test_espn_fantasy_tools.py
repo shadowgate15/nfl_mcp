@@ -166,6 +166,29 @@ class TestGetEspnPlayerNews:
         assert kwargs["params"] == {"playerId": 3139477, "limit": 10}
 
     @pytest.mark.asyncio
+    async def test_limit_enforced_client_side(self, monkeypatch):
+        """limit is enforced on the returned feed even if ESPN's server ignores
+        the query param (the catalog only confirms `playerId`, not `limit`,
+        as a real server-side param for this endpoint)."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        response = MagicMock()
+        response.status_code = 200
+        response.raise_for_status = MagicMock()
+        response.json.return_value = {
+            "news": {"feed": [{"id": i} for i in range(5)]}
+        }
+        client = _mock_http_client(response)
+
+        with patch('nfl_mcp.espn_fantasy_tools.create_http_client', return_value=client):
+            result = await get_espn_player_news(limit=2)
+
+        assert result["success"] is True
+        assert result["total_news"] == 2
+        assert len(result["news"]) == 2
+
+    @pytest.mark.asyncio
     async def test_success_without_player_id_filter(self, monkeypatch):
         """With no filters, no playerId/limit params are sent at all."""
         monkeypatch.delenv("ESPN_S2", raising=False)

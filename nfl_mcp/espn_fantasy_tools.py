@@ -134,6 +134,12 @@ async def get_espn_player_news(player_id: int | None = None, limit: int | None =
         data = response.json()
         feed = data.get("news", {}).get("feed", [])
 
+        # The catalog's reference client only documents `playerId` as a request
+        # param (§8) — `limit` is sent best-effort but not confirmed honored
+        # server-side, so it's also enforced here to guarantee the contract.
+        if limit is not None:
+            feed = feed[:limit]
+
         return create_success_response({
             "news": feed,
             "total_news": len(feed),

@@ -291,6 +291,7 @@ class ConfigManager:
                 "sleeper_nfl_state": "Sleeper NFL State Fetcher",
                 "sleeper_trending": "Sleeper Trending Players Fetcher",
                 "cbs_fantasy": "CBS Fantasy Football Fetcher",
+                "espn_player_news": "ESPN Player News Fetcher",
             }
             description = service_descriptions.get(service_name, "Generic Service")
             return f"{base_agent} ({description})"

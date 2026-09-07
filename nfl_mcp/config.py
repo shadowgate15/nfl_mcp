@@ -290,6 +290,7 @@ def _get_user_agents():
             "sleeper_nfl_state": config_manager.get_user_agent("sleeper_nfl_state"),
             "sleeper_trending": config_manager.get_user_agent("sleeper_trending"),
             "cbs_fantasy": config_manager.get_user_agent("cbs_fantasy"),
+            "espn_player_news": config_manager.get_user_agent("espn_player_news"),
         }
     except Exception:
         # Fallback to hardcoded values
@@ -310,6 +311,7 @@ def _get_user_agents():
             "sleeper_nfl_state": f"{base_agent} (Sleeper NFL State Fetcher)",
             "sleeper_trending": f"{base_agent} (Sleeper Trending Players Fetcher)",
             "cbs_fantasy": f"{base_agent} (CBS Fantasy Football Fetcher)",
+            "espn_player_news": f"{base_agent} (ESPN Player News Fetcher)",
         }
 
 USER_AGENTS = _get_user_agents()
