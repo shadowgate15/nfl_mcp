@@ -89,10 +89,11 @@ def main() -> int:
 
         cookies: dict[str, str] = {}
         deadline = time.monotonic() + TIMEOUT_SECONDS
+        timed_out = True
         while time.monotonic() < deadline:
             cookies = _extract_cookies(context)
-            if enter_pressed.is_set() or len(cookies) == len(COOKIE_ENV_NAMES):
-                cookies = _extract_cookies(context)
+            if len(cookies) == len(COOKIE_ENV_NAMES) or enter_pressed.is_set():
+                timed_out = False
                 break
             time.sleep(POLL_INTERVAL_SECONDS)
 
@@ -100,10 +101,18 @@ def main() -> int:
 
     missing = set(COOKIE_ENV_NAMES.values()) - set(cookies)
     if missing:
-        print(
-            f"Timed out after {TIMEOUT_SECONDS}s without capturing: {', '.join(sorted(missing))}",
-            file=sys.stderr,
-        )
+        if timed_out:
+            print(
+                f"Timed out after {TIMEOUT_SECONDS}s without capturing: "
+                f"{', '.join(sorted(missing))}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Enter was pressed but these cookies weren't found yet: "
+                f"{', '.join(sorted(missing))}. Make sure you're fully logged in, then rerun.",
+                file=sys.stderr,
+            )
         return 1
 
     _write_env(cookies)
