@@ -13,9 +13,9 @@ without callers ever seeing it:
     @handle_espn_auth_errors
     async def get_espn_league(...): ...
 
-`get_espn_league` is the first tool built on this foundation; later tickets
-add the rest of the catalog (rosters, standings, matchups, draft,
-transactions, free agents) as siblings in this module.
+`get_espn_league` and `get_espn_transactions` are built on this foundation;
+later tickets add the rest of the catalog (rosters, standings, matchups,
+draft, free agents) as siblings in this module.
 """
 
 import logging
@@ -222,24 +222,30 @@ async def get_espn_transactions(
     """
     Get an ESPN fantasy league's transaction/waiver activity log.
 
-    Requests the `mTransactions2` view (docs/ESPN_FANTASY_ENDPOINT_CATALOG.md
-    §6). `week` is forwarded as `scoringPeriodId` when given; omitted
-    entirely when `week` is None, letting ESPN apply its own default period
-    rather than guessing one. A response with no `transactions` key means no
-    transactions matched — the catalog notes this is indistinguishable from
-    "empty result" at the wire level, so it's treated as an empty list here,
-    not an error. `types` filters the returned list client-side by each
-    transaction's `type` field (e.g. "WAIVER", "TRADE"): the catalog only
-    confirms an `x-fantasy-filter` header *exists* for server-side filtering,
-    not its exact JSON shape, so filtering here guarantees the contract
-    regardless of what ESPN's server does — same reasoning as
-    `get_espn_player_news`'s client-side `limit` enforcement. Transparently
-    spans the 2018 leagueHistory boundary via `_fetch_espn_league_view`.
+    Requests the `mTransactions2` view, which the catalog documents as
+    needing a *required* `scoringPeriodId` param (docs/ESPN_FANTASY_ENDPOINT_CATALOG.md
+    §6) — the reference client (`espn_api`) never omits it either, always
+    resolving `self.scoringPeriodId` (a top-level field on any league fetch,
+    not specific to `mTransactions2`) before requesting transactions when the
+    caller doesn't supply one. This mirrors that: `week` is forwarded as
+    `scoringPeriodId` directly when given; when omitted, one extra lightweight
+    `_fetch_espn_league_view` call resolves the league's current
+    `scoringPeriodId` first, same as `espn_api`'s own two-step resolution. A
+    response with no `transactions` key means no transactions matched — the
+    catalog notes this is indistinguishable from "empty result" at the wire
+    level, so it's treated as an empty list here, not an error. `types`
+    filters the returned list client-side by each transaction's `type` field
+    (e.g. "WAIVER", "TRADE"): the catalog only confirms an `x-fantasy-filter`
+    header *exists* for server-side filtering, not its exact JSON shape, so
+    filtering here guarantees the contract regardless of what ESPN's server
+    does — same reasoning as `get_espn_player_news`'s client-side `limit`
+    enforcement. Transparently spans the 2018 leagueHistory boundary via
+    `_fetch_espn_league_view`.
 
     Args:
         league_id: The ESPN league ID.
-        week: Scoring period to fetch transactions for; ESPN's own default
-            period applies if omitted.
+        week: Scoring period to fetch transactions for; the league's current
+            scoring period is resolved and used if omitted.
         types: Optional list of transaction type strings to filter to (e.g.
             ["WAIVER", "TRADE"]). Unfiltered if omitted.
         year: Season year; defaults to the current year if omitted.
@@ -255,11 +261,21 @@ async def get_espn_transactions(
     """
     resolved_year = year if year is not None else datetime.now().year
 
-    extra_params: list[tuple[str, str | int | float | bool | None]] = []
-    if week is not None:
-        extra_params.append(("scoringPeriodId", str(week)))
-
     async with create_http_client() as client:
+        scoring_period_id = week
+        if scoring_period_id is None:
+            current_league_data = await _fetch_espn_league_view(
+                client,
+                league_id=league_id,
+                year=resolved_year,
+                views=["mSettings"],
+            )
+            scoring_period_id = current_league_data.get("scoringPeriodId")
+
+        extra_params: list[tuple[str, str | int | float | bool | None]] = []
+        if scoring_period_id is not None:
+            extra_params.append(("scoringPeriodId", str(scoring_period_id)))
+
         league_data = await _fetch_espn_league_view(
             client,
             league_id=league_id,

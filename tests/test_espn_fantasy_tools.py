@@ -333,23 +333,39 @@ class TestGetEspnTransactions:
         assert all(t["type"] == "WAIVER" for t in result["transactions"])
 
     @pytest.mark.asyncio
-    async def test_week_omitted_sends_no_scoring_period_param(self, monkeypatch):
-        """With no `week`, no `scoringPeriodId` param is sent at all."""
+    async def test_week_omitted_resolves_current_scoring_period(self, monkeypatch):
+        """With no `week`, the league's current `scoringPeriodId` is resolved via
+        one extra lightweight request first, then forwarded to the mTransactions2
+        request — mirroring espn_api's own two-step resolution, since the catalog
+        documents scoringPeriodId as a required param for this view."""
         monkeypatch.setenv("ESPN_S2", "some-cookie")
         monkeypatch.setenv("ESPN_SWID", "some-swid")
 
-        mock_response = MagicMock()
-        mock_response.raise_for_status.return_value = None
-        mock_response.json.return_value = {"transactions": []}
+        settings_response = MagicMock()
+        settings_response.raise_for_status.return_value = None
+        settings_response.json.return_value = {"scoringPeriodId": 7, "settings": {}}
 
-        mock_client = _mock_http_client(mock_response)
+        transactions_response = MagicMock()
+        transactions_response.raise_for_status.return_value = None
+        transactions_response.json.return_value = {"transactions": []}
+
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = [settings_response, transactions_response]
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
 
         with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
             result = await get_espn_transactions("1234", year=2023)
 
         assert result["success"] is True
-        call_args = mock_client.get.call_args
-        assert call_args.kwargs["params"] == [("view", "mTransactions2")]
+        assert mock_client.get.call_count == 2
+
+        first_call, second_call = mock_client.get.call_args_list
+        assert first_call.kwargs["params"] == [("view", "mSettings")]
+        assert second_call.kwargs["params"] == [
+            ("view", "mTransactions2"),
+            ("scoringPeriodId", "7"),
+        ]
 
     @pytest.mark.asyncio
     async def test_missing_transactions_key_is_empty_not_error(self, monkeypatch):
