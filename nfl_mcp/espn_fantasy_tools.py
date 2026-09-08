@@ -13,11 +13,13 @@ without callers ever seeing it:
     @handle_espn_auth_errors
     async def get_espn_league(...): ...
 
-`get_espn_league` is the first tool built on this foundation; later tickets
-add the rest of the catalog (rosters, standings, matchups, draft,
-transactions, free agents) as siblings in this module.
+`get_espn_league` is the first tool built on this foundation; `get_espn_players`
+and `get_espn_free_agents` are the next two. Later tickets add the rest of
+the catalog (rosters, standings, matchups, draft, transactions) as siblings
+in this module.
 """
 
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -104,6 +106,11 @@ FANTASY_BASE_ENDPOINT = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/"
 _LEAGUE_HISTORY_BOUNDARY_YEAR = 2018
 
 
+def _resolve_year(year: int | None) -> int:
+    """`year`, or the current year if omitted — shared by every ESPN Fantasy tool."""
+    return year if year is not None else datetime.now().year
+
+
 def _espn_auth_cookies() -> dict[str, str]:
     """
     ESPN_S2/ESPN_SWID as request cookies, under the names ESPN expects.
@@ -119,6 +126,8 @@ async def _fetch_espn_league_view(
     league_id: str,
     year: int,
     views: list[str],
+    extra_params: list[tuple[str, str | int | float | bool | None]] | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Fetch one or more `view=` slices of the ESPN league endpoint.
@@ -135,6 +144,11 @@ async def _fetch_espn_league_view(
         year: The season year; selects which URL format applies.
         views: `view=` query values to request (ESPN allows repeating this
             query param to request multiple views in one call).
+        extra_params: Additional query params to send alongside `view` (and,
+            pre-boundary, `seasonId`) — e.g. `get_espn_free_agents`'s
+            `scoringPeriodId`.
+        extra_headers: Additional headers to merge over the base
+            `espn_fantasy` User-Agent header — e.g. an `x-fantasy-filter`.
 
     Returns:
         The inner league object, whichever envelope ESPN actually sent.
@@ -150,11 +164,17 @@ async def _fetch_espn_league_view(
     ]
     if is_pre_boundary:
         params.append(("seasonId", str(year)))
+    if extra_params:
+        params.extend(extra_params)
+
+    headers = get_http_headers("espn_fantasy")
+    if extra_headers:
+        headers = {**headers, **extra_headers}
 
     response = await client.get(
         url,
         params=params,
-        headers=get_http_headers("espn_fantasy"),
+        headers=headers,
         cookies=_espn_auth_cookies(),
     )
     response.raise_for_status()
@@ -189,7 +209,7 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         - error: Error message (if any)
         - error_type: Type of error (if any)
     """
-    resolved_year = year if year is not None else datetime.now().year
+    resolved_year = _resolve_year(year)
 
     async with create_http_client() as client:
         league_data = await _fetch_espn_league_view(
@@ -200,6 +220,108 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         )
 
     return create_success_response({"league": league_data})
+
+
+# `players_wl` is the `/players` endpoint's own view param (catalog §7b) —
+# distinct from the `mSettings`/`kona_player_info` view names the
+# league-scoped endpoint uses.
+_ACTIVE_PLAYERS_FILTER_HEADER = json.dumps({"filterActive": {"value": True}})
+
+
+@handle_http_errors(
+    default_data={"players": []},
+    operation_name="fetching ESPN pro player pool",
+)
+async def get_espn_players(year: int | None = None) -> dict:
+    """
+    Get the full ESPN pro-player pool for a season, unscoped to any league.
+
+    Hits the separate `/players` endpoint (catalog §7b) — not the
+    league-scoped `kona_player_info` view `get_espn_free_agents` uses — so it
+    takes no `league_id` and needs no `ESPN_S2`/`ESPN_SWID` cookies, and
+    deliberately does not stack `@handle_espn_auth_errors` (ADR 0004). ESPN's
+    raw response here is a bare JSON array (unlike every league-scoped
+    players view, which wraps in `{"players": [...]}`); this tool normalizes
+    both shapes to the same `{"players": [...]}` output (ADR 0003).
+
+    Args:
+        year: Season year; defaults to the current year if omitted.
+
+    Returns:
+        A dictionary containing:
+        - players: The full pro-player pool as ESPN returns them
+        - success: Whether the request was successful
+        - error: Error message (if any)
+        - error_type: Type of error (if any)
+    """
+    resolved_year = _resolve_year(year)
+    url = f"{FANTASY_BASE_ENDPOINT}ffl/seasons/{resolved_year}/players"
+
+    headers = {**get_http_headers("espn_fantasy"), "x-fantasy-filter": _ACTIVE_PLAYERS_FILTER_HEADER}
+
+    async with create_http_client() as client:
+        response = await client.get(url, params=[("view", "players_wl")], headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+    players = data if isinstance(data, list) else data.get("players", [])
+
+    return create_success_response({"players": players})
+
+
+# Restricts the league-scoped `kona_player_info` view to free-agent/waiver
+# players server-side (catalog §7a) — without it, the view returns every
+# rostered-or-not player in the league, not just the ones actually
+# available to add.
+_FREE_AGENT_FILTER_HEADER = json.dumps({"players": {"filterStatus": {"value": ["FREEAGENT", "WAIVERS"]}}})
+
+
+@handle_http_errors(
+    default_data={"players": []},
+    operation_name="fetching ESPN league free agents",
+)
+@handle_espn_auth_errors
+async def get_espn_free_agents(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+    """
+    Get free-agent and waiver-available players for an ESPN fantasy league.
+
+    Requests the `kona_player_info` view (catalog §7a), restricted
+    server-side to FREEAGENT/WAIVERS status via an `x-fantasy-filter`
+    header. Reuses `_fetch_espn_league_view` (ADR 0004), so this
+    transparently spans the 2018 leagueHistory boundary the same way
+    `get_espn_league` does.
+
+    Args:
+        league_id: The ESPN league ID.
+        week: Scoring period (week) to scope free agency to. Omitted
+            entirely from the request when None, letting ESPN apply its own
+            current-period default.
+        year: Season year; defaults to the current year if omitted.
+
+    Returns:
+        A dictionary containing:
+        - players: Free-agent/waiver player entries as ESPN returns them
+        - success: Whether the request was successful
+        - error: Error message (if any)
+        - error_type: Type of error (if any)
+    """
+    resolved_year = _resolve_year(year)
+
+    extra_params: list[tuple[str, str | int | float | bool | None]] = []
+    if week is not None:
+        extra_params.append(("scoringPeriodId", week))
+
+    async with create_http_client() as client:
+        data = await _fetch_espn_league_view(
+            client,
+            league_id=league_id,
+            year=resolved_year,
+            views=["kona_player_info"],
+            extra_params=extra_params,
+            extra_headers={"x-fantasy-filter": _FREE_AGENT_FILTER_HEADER},
+        )
+
+    return create_success_response({"players": data.get("players", [])})
 
 
 @handle_http_errors(
