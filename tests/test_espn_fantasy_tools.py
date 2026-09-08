@@ -1,6 +1,7 @@
 """
 Tests for espn_fantasy_tools.py: the @handle_espn_auth_errors decorator
-foundation, and get_espn_league / get_espn_player_news, the tools built on it.
+foundation, and get_espn_league / get_espn_transactions / get_espn_player_news,
+the tools built on it.
 
 Covers @handle_espn_auth_errors against a trivial wrapped function:
 - credentials unset short-circuits before the wrapped function is called
@@ -11,6 +12,14 @@ Covers get_espn_league:
 - success path on the pre-2018 leagueHistory array-wrapped envelope,
   normalizing to the same output shape
 - a non-401/403 HTTP failure (500) falls through to @handle_http_errors
+- registration in tool_registry.get_all_tools()
+
+Covers get_espn_transactions:
+- success path, unfiltered
+- success path, filtered by `types`
+- `week` forwarded as `scoringPeriodId` only when given
+- a missing `transactions` key is treated as an empty list, not an error
+- error path (401)
 - registration in tool_registry.get_all_tools()
 
 Also covers get_espn_player_news, the one tool in this module that
@@ -27,6 +36,7 @@ from nfl_mcp.espn_errors import classify_espn_auth_error
 from nfl_mcp.espn_fantasy_tools import (
     get_espn_league,
     get_espn_player_news,
+    get_espn_transactions,
     handle_espn_auth_errors,
 )
 
@@ -253,6 +263,176 @@ class TestGetEspnLeague:
 
         tool_names = [t.__name__ for t in get_all_tools()]
         assert "get_espn_league" in tool_names
+
+
+class TestGetEspnTransactions:
+    """Test get_espn_transactions."""
+
+    @pytest.mark.asyncio
+    async def test_success_unfiltered(self, monkeypatch):
+        """All transactions ESPN returns come back untouched when `types` is omitted."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        league_data = {
+            "id": 1234,
+            "transactions": [
+                {"id": "txn-1", "type": "WAIVER", "teamId": 1},
+                {"id": "txn-2", "type": "TRADE", "teamId": 2},
+            ],
+        }
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = league_data
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_transactions("1234", week=3, year=2023)
+
+        assert result["success"] is True
+        assert result["total_transactions"] == 2
+        assert result["transactions"] == league_data["transactions"]
+
+        call_args = mock_client.get.call_args
+        assert call_args.args[0] == (
+            "https://lm-api-reads.fantasy.espn.com/apis/v3/games/"
+            "ffl/seasons/2023/segments/0/leagues/1234"
+        )
+        assert call_args.kwargs["params"] == [
+            ("view", "mTransactions2"),
+            ("scoringPeriodId", "3"),
+        ]
+        assert call_args.kwargs["cookies"] == {"espn_s2": "some-cookie", "SWID": "some-swid"}
+
+    @pytest.mark.asyncio
+    async def test_success_filtered_by_types(self, monkeypatch):
+        """`types` filters the returned list to matching transaction types only."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        league_data = {
+            "transactions": [
+                {"id": "txn-1", "type": "WAIVER"},
+                {"id": "txn-2", "type": "TRADE"},
+                {"id": "txn-3", "type": "WAIVER"},
+                {"id": "txn-4", "type": "FREEAGENT"},
+            ],
+        }
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = league_data
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_transactions("1234", types=["WAIVER"])
+
+        assert result["success"] is True
+        assert result["total_transactions"] == 2
+        assert all(t["type"] == "WAIVER" for t in result["transactions"])
+
+    @pytest.mark.asyncio
+    async def test_week_omitted_sends_no_scoring_period_param(self, monkeypatch):
+        """With no `week`, no `scoringPeriodId` param is sent at all."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"transactions": []}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_transactions("1234", year=2023)
+
+        assert result["success"] is True
+        call_args = mock_client.get.call_args
+        assert call_args.kwargs["params"] == [("view", "mTransactions2")]
+
+    @pytest.mark.asyncio
+    async def test_missing_transactions_key_is_empty_not_error(self, monkeypatch):
+        """A response with no `transactions` key means no matches, not an error
+        (catalog: indistinguishable from a real empty-result 200 at the wire level)."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"id": 1234}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_transactions("1234", year=2023)
+
+        assert result["success"] is True
+        assert result["transactions"] == []
+        assert result["total_transactions"] == 0
+
+    @pytest.mark.asyncio
+    async def test_401_error_path(self, monkeypatch):
+        """A 401 response is classified as expired ESPN cookies, not a generic HTTP error."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        response = httpx.Response(401, request=httpx.Request("GET", "https://example.com"))
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "401", request=response.request, response=response
+        )
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_transactions("1234", year=2023)
+
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.ESPN_EXPIRED_COOKIES
+
+    @pytest.mark.asyncio
+    async def test_non_auth_http_error_falls_through_to_handle_http_errors(self, monkeypatch):
+        """A non-401/403 HTTP failure (500) is not swallowed by the auth decorator
+        and comes back with the outer decorator's default_data merged in."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        response = httpx.Response(500, request=httpx.Request("GET", "https://example.com"))
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=response.request, response=response
+        )
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_transactions("1234", year=2023)
+
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.HTTP
+        assert result["transactions"] == []
+        assert result["total_transactions"] == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_credentials_short_circuits(self, monkeypatch):
+        """Missing ESPN credentials short-circuit before any HTTP call is made."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client") as mock_create_client:
+            result = await get_espn_transactions("1234", year=2023)
+
+        mock_create_client.assert_not_called()
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.ESPN_CREDENTIALS_NOT_CONFIGURED
+
+    def test_registered_in_tool_registry(self):
+        """get_espn_transactions is present in tool_registry.get_all_tools()."""
+        from nfl_mcp.tool_registry import get_all_tools
+
+        tool_names = [t.__name__ for t in get_all_tools()]
+        assert "get_espn_transactions" in tool_names
 
 
 class TestGetEspnPlayerNews:

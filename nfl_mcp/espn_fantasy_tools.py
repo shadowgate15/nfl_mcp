@@ -119,6 +119,7 @@ async def _fetch_espn_league_view(
     league_id: str,
     year: int,
     views: list[str],
+    extra_params: list[tuple[str, str | int | float | bool | None]] | None = None,
 ) -> dict[str, Any]:
     """
     Fetch one or more `view=` slices of the ESPN league endpoint.
@@ -135,6 +136,9 @@ async def _fetch_espn_league_view(
         year: The season year; selects which URL format applies.
         views: `view=` query values to request (ESPN allows repeating this
             query param to request multiple views in one call).
+        extra_params: Additional query params a specific view needs (e.g.
+            `scoringPeriodId` for `mTransactions2`), appended after the
+            `view`/`seasonId` params this helper always sets.
 
     Returns:
         The inner league object, whichever envelope ESPN actually sent.
@@ -150,6 +154,8 @@ async def _fetch_espn_league_view(
     ]
     if is_pre_boundary:
         params.append(("seasonId", str(year)))
+    if extra_params:
+        params.extend(extra_params)
 
     response = await client.get(
         url,
@@ -200,6 +206,77 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         )
 
     return create_success_response({"league": league_data})
+
+
+@handle_http_errors(
+    default_data={"transactions": [], "total_transactions": 0},
+    operation_name="fetching ESPN transactions",
+)
+@handle_espn_auth_errors
+async def get_espn_transactions(
+    league_id: str,
+    week: int | None = None,
+    types: list[str] | None = None,
+    year: int | None = None,
+) -> dict:
+    """
+    Get an ESPN fantasy league's transaction/waiver activity log.
+
+    Requests the `mTransactions2` view (docs/ESPN_FANTASY_ENDPOINT_CATALOG.md
+    §6). `week` is forwarded as `scoringPeriodId` when given; omitted
+    entirely when `week` is None, letting ESPN apply its own default period
+    rather than guessing one. A response with no `transactions` key means no
+    transactions matched — the catalog notes this is indistinguishable from
+    "empty result" at the wire level, so it's treated as an empty list here,
+    not an error. `types` filters the returned list client-side by each
+    transaction's `type` field (e.g. "WAIVER", "TRADE"): the catalog only
+    confirms an `x-fantasy-filter` header *exists* for server-side filtering,
+    not its exact JSON shape, so filtering here guarantees the contract
+    regardless of what ESPN's server does — same reasoning as
+    `get_espn_player_news`'s client-side `limit` enforcement. Transparently
+    spans the 2018 leagueHistory boundary via `_fetch_espn_league_view`.
+
+    Args:
+        league_id: The ESPN league ID.
+        week: Scoring period to fetch transactions for; ESPN's own default
+            period applies if omitted.
+        types: Optional list of transaction type strings to filter to (e.g.
+            ["WAIVER", "TRADE"]). Unfiltered if omitted.
+        year: Season year; defaults to the current year if omitted.
+
+    Returns:
+        A dictionary containing:
+        - transactions: List of transaction objects, as ESPN returns them,
+          optionally filtered by `types`
+        - total_transactions: Number of transactions returned
+        - success: Whether the request was successful
+        - error: Error message (if any)
+        - error_type: Type of error (if any)
+    """
+    resolved_year = year if year is not None else datetime.now().year
+
+    extra_params: list[tuple[str, str | int | float | bool | None]] = []
+    if week is not None:
+        extra_params.append(("scoringPeriodId", str(week)))
+
+    async with create_http_client() as client:
+        league_data = await _fetch_espn_league_view(
+            client,
+            league_id=league_id,
+            year=resolved_year,
+            views=["mTransactions2"],
+            extra_params=extra_params or None,
+        )
+
+    transactions = league_data.get("transactions", [])
+    if types is not None:
+        types_set = set(types)
+        transactions = [t for t in transactions if t.get("type") in types_set]
+
+    return create_success_response({
+        "transactions": transactions,
+        "total_transactions": len(transactions),
+    })
 
 
 @handle_http_errors(
