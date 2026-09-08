@@ -165,15 +165,10 @@ def _espn_news() -> str:
 
 
 # ---------------------------------------------------------------------------
-# ESPN Fantasy — the maintainer's own real private league, authenticated via
-# ESPN_S2/ESPN_SWID repo secrets. Critical (unlike the public espn.* checks
-# above): a red build here means either ESPN's API shape broke or the
-# maintainer's cookies expired, and the two need different responses (ADR
-# 0001, ADR 0003).
+# ESPN Fantasy — the maintainer's own private league; critical, since a red
+# build here means ESPN's shape broke or the cookies expired (ADR 0001/0003)
 # ---------------------------------------------------------------------------
-# Not a secret — a league ID is just a routing target, matching how every
-# other check above hardcodes its own target. Maintainer: replace with your
-# real private league ID.
+# Not a secret, matching every check above. Maintainer: replace with your league ID.
 _ESPN_FANTASY_LEAGUE_ID = "REPLACE_WITH_MAINTAINER_ESPN_LEAGUE_ID"
 
 
