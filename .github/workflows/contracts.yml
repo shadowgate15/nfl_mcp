@@ -6,7 +6,7 @@ name: Source Contracts
 # (e.g. FantasyCalc drops sleeperId, or the nflverse/Sleeper shape changes).
 on:
   schedule:
-    - cron: "0 13 * * *"   # daily 13:00 UTC
+    - cron: "0 13 * * *" # daily 13:00 UTC
   workflow_dispatch: {}
 
 jobs:
@@ -28,5 +28,5 @@ jobs:
       - name: Run contract checks (fails on critical breakage)
         env:
           ESPN_S2: ${{ secrets.ESPN_S2 }}
-          ESPN_SWID: ${{ secrets.ESPN_SWID }}
+          ESPN_SWID: ${{ vars.ESPN_SWID }}
         run: uv run python -m evals.contracts.checks
