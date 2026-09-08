@@ -1,7 +1,8 @@
 """
 Tests for espn_fantasy_tools.py: the @handle_espn_auth_errors decorator
 foundation, and the tools built on it (get_espn_league, get_espn_rosters,
-get_espn_standings, get_espn_player_news).
+get_espn_standings, get_espn_scoreboard, get_espn_matchups,
+get_espn_player_news).
 
 Covers @handle_espn_auth_errors against a trivial wrapped function:
 - credentials unset short-circuits before the wrapped function is called
@@ -27,6 +28,17 @@ Covers get_espn_standings:
 - missing-credentials short-circuit
 - registration in tool_registry.get_all_tools()
 
+Covers get_espn_scoreboard and get_espn_matchups:
+- success path with no `week` filter (full season's schedule)
+- success path with a `week` filter (returned schedule filtered
+  client-side to that matchup period); get_espn_matchups additionally
+  sends the x-fantasy-filter header (mirrors box_scores()), while
+  get_espn_scoreboard does not (mirrors scoreboard() — the catalog never
+  confirms that header scopes the lighter mMatchupScore view)
+- the two tools request different `view=` params (mMatchupScore vs.
+  mMatchup+mScoreboard) but share the same _fetch_espn_league_view helper
+- a non-401/403 HTTP failure (500) falls through to @handle_http_errors
+
 Also covers get_espn_player_news, the one tool in this module that
 deliberately omits @handle_espn_auth_errors (ADR 0004).
 """
@@ -40,8 +52,10 @@ from nfl_mcp.errors import ErrorType
 from nfl_mcp.espn_errors import classify_espn_auth_error
 from nfl_mcp.espn_fantasy_tools import (
     get_espn_league,
+    get_espn_matchups,
     get_espn_player_news,
     get_espn_rosters,
+    get_espn_scoreboard,
     get_espn_standings,
     handle_espn_auth_errors,
 )
@@ -506,6 +520,212 @@ class TestGetEspnStandings:
 
         tool_names = [t.__name__ for t in get_all_tools()]
         assert "get_espn_standings" in tool_names
+
+
+class TestGetEspnScoreboard:
+    """Test get_espn_scoreboard: final scores only (mMatchupScore)."""
+
+    @pytest.mark.asyncio
+    async def test_success_no_week_filter(self, monkeypatch):
+        """With no week given, the full season's schedule is returned and no
+        x-fantasy-filter header is sent."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [
+            {"id": 1, "matchupPeriodId": 1, "home": {"teamId": 1, "totalPoints": 100.0},
+             "away": {"teamId": 2, "totalPoints": 90.0}},
+            {"id": 2, "matchupPeriodId": 2, "home": {"teamId": 1, "totalPoints": 88.0},
+             "away": {"teamId": 3, "totalPoints": 95.0}},
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_scoreboard("1234", year=2018)
+
+        assert result["success"] is True
+        assert result["scoreboard"] == schedule
+
+        call_args = mock_client.get.call_args
+        assert call_args.kwargs["params"] == [("view", "mMatchupScore")]
+        assert "x-fantasy-filter" not in call_args.kwargs["headers"]
+
+    @pytest.mark.asyncio
+    async def test_success_with_week_filter(self, monkeypatch):
+        """With week given, the returned schedule is filtered client-side to
+        that matchup period (no x-fantasy-filter header — the catalog only
+        confirms that header scopes box_scores()'s mMatchup+mScoreboard
+        view, not this tool's lighter mMatchupScore view)."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [
+            {"id": 1, "matchupPeriodId": 1, "home": {"teamId": 1}, "away": {"teamId": 2}},
+            {"id": 2, "matchupPeriodId": 3, "home": {"teamId": 1}, "away": {"teamId": 3}},
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_scoreboard("1234", week=3, year=2018)
+
+        assert result["success"] is True
+        assert result["scoreboard"] == [schedule[1]]
+
+        call_args = mock_client.get.call_args
+        assert "x-fantasy-filter" not in call_args.kwargs["headers"]
+
+    @pytest.mark.asyncio
+    async def test_non_auth_http_error_falls_through_to_handle_http_errors(self, monkeypatch):
+        """A non-401/403 HTTP failure (500) is not swallowed by the auth decorator."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        response = httpx.Response(500, request=httpx.Request("GET", "https://example.com"))
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=response.request, response=response
+        )
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_scoreboard("1234", year=2018)
+
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.HTTP
+        assert result["scoreboard"] == []
+
+    @pytest.mark.asyncio
+    async def test_missing_credentials_short_circuits(self, monkeypatch):
+        """Missing ESPN credentials short-circuit before any HTTP call is made."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client") as mock_create_client:
+            result = await get_espn_scoreboard("1234", year=2018)
+
+        mock_create_client.assert_not_called()
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.ESPN_CREDENTIALS_NOT_CONFIGURED
+
+    def test_registered_in_tool_registry(self):
+        """get_espn_scoreboard is present in tool_registry.get_all_tools()."""
+        from nfl_mcp.tool_registry import get_all_tools
+
+        tool_names = [t.__name__ for t in get_all_tools()]
+        assert "get_espn_scoreboard" in tool_names
+
+
+class TestGetEspnMatchups:
+    """Test get_espn_matchups: full box-score/lineup detail (mMatchup+mScoreboard)."""
+
+    @pytest.mark.asyncio
+    async def test_success_no_week_filter(self, monkeypatch):
+        """With no week given, the full season's schedule is returned, requesting
+        both mMatchup and mScoreboard views, and no x-fantasy-filter header is sent."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [
+            {"id": 1, "matchupPeriodId": 1,
+             "home": {"teamId": 1, "totalPoints": 100.0,
+                       "rosterForCurrentScoringPeriod": {"entries": []}},
+             "away": {"teamId": 2, "totalPoints": 90.0,
+                       "rosterForCurrentScoringPeriod": {"entries": []}}},
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", year=2018)
+
+        assert result["success"] is True
+        assert result["matchups"] == schedule
+
+        call_args = mock_client.get.call_args
+        assert call_args.kwargs["params"] == [("view", "mMatchup"), ("view", "mScoreboard")]
+        assert "x-fantasy-filter" not in call_args.kwargs["headers"]
+
+    @pytest.mark.asyncio
+    async def test_success_with_week_filter(self, monkeypatch):
+        """With week given, x-fantasy-filter scopes the request and the
+        returned schedule is filtered client-side to that matchup period."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [
+            {"id": 1, "matchupPeriodId": 1, "home": {"teamId": 1}, "away": {"teamId": 2}},
+            {"id": 2, "matchupPeriodId": 5, "home": {"teamId": 1}, "away": {"teamId": 3}},
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", week=5, year=2018)
+
+        assert result["success"] is True
+        assert result["matchups"] == [schedule[1]]
+
+        call_args = mock_client.get.call_args
+        import json as _json
+        assert _json.loads(call_args.kwargs["headers"]["x-fantasy-filter"]) == {
+            "schedule": {"filterMatchupPeriodIds": {"value": [5]}}
+        }
+
+    @pytest.mark.asyncio
+    async def test_non_auth_http_error_falls_through_to_handle_http_errors(self, monkeypatch):
+        """A non-401/403 HTTP failure (500) is not swallowed by the auth decorator."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        response = httpx.Response(500, request=httpx.Request("GET", "https://example.com"))
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=response.request, response=response
+        )
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", year=2018)
+
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.HTTP
+        assert result["matchups"] == []
+
+    @pytest.mark.asyncio
+    async def test_missing_credentials_short_circuits(self, monkeypatch):
+        """Missing ESPN credentials short-circuit before any HTTP call is made."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client") as mock_create_client:
+            result = await get_espn_matchups("1234", year=2018)
+
+        mock_create_client.assert_not_called()
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.ESPN_CREDENTIALS_NOT_CONFIGURED
+
+    def test_registered_in_tool_registry(self):
+        """get_espn_matchups is present in tool_registry.get_all_tools()."""
+        from nfl_mcp.tool_registry import get_all_tools
+
+        tool_names = [t.__name__ for t in get_all_tools()]
+        assert "get_espn_matchups" in tool_names
 
 
 class TestGetEspnPlayerNews:

@@ -85,6 +85,8 @@ def get_all_tools() -> list[Callable]:
         get_espn_league,
         get_espn_rosters,
         get_espn_standings,
+        get_espn_scoreboard,
+        get_espn_matchups,
         get_espn_player_news,
 
         # Web Tools
@@ -464,6 +466,50 @@ async def get_espn_standings(league_id: str, year: int | None = None) -> dict:
         return await espn_fantasy_tools.get_espn_standings(league_id, year)
     except ValueError as e:
         return {"standings": [], "success": False, "error": f"Invalid league_id: {e!s}"}
+
+
+@timing_decorator("get_espn_scoreboard", tool_type="espn_fantasy")
+async def get_espn_scoreboard(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+    """Get final scores for an ESPN fantasy league's matchups.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        week (int, optional): Matchup period (week) to filter to; omits for the full season's schedule.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {scoreboard: [...], success, error?, error_type?}
+    Example: get_espn_scoreboard(league_id="1234", week=3, year=2018)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        if week is not None:
+            week = validate_numeric_input(
+                week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
+            )
+        return await espn_fantasy_tools.get_espn_scoreboard(league_id, week, year)
+    except ValueError as e:
+        return {"scoreboard": [], "success": False, "error": f"Invalid input: {e!s}"}
+
+
+@timing_decorator("get_espn_matchups", tool_type="espn_fantasy")
+async def get_espn_matchups(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+    """Get full box-score/lineup detail for an ESPN fantasy league's matchups.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        week (int, optional): Matchup period (week) to filter to; omits for the full season's schedule.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {matchups: [...], success, error?, error_type?}
+    Example: get_espn_matchups(league_id="1234", week=3, year=2018)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        if week is not None:
+            week = validate_numeric_input(
+                week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
+            )
+        return await espn_fantasy_tools.get_espn_matchups(league_id, week, year)
+    except ValueError as e:
+        return {"matchups": [], "success": False, "error": f"Invalid input: {e!s}"}
 
 
 @timing_decorator("get_espn_player_news", tool_type="espn_fantasy")
