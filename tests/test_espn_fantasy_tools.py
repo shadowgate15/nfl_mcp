@@ -1,12 +1,14 @@
 """
 Tests for espn_fantasy_tools.py: the @handle_espn_auth_errors decorator
-foundation, and get_espn_league / get_espn_player_news, the tools built on it.
+foundation, and get_espn_league / get_espn_draft / get_espn_player_news,
+the tools built on it.
 
 Covers @handle_espn_auth_errors against a trivial wrapped function:
 - credentials unset short-circuits before the wrapped function is called
 - a mocked 401 response delegates to classify_espn_auth_error
 
-Covers get_espn_league:
+Covers get_espn_league and get_espn_draft (same shape, both built on
+_fetch_espn_league_view):
 - success path on the 2018+ object-wrapped envelope
 - success path on the pre-2018 leagueHistory array-wrapped envelope,
   normalizing to the same output shape
