@@ -13,9 +13,9 @@ without callers ever seeing it:
     @handle_espn_auth_errors
     async def get_espn_league(...): ...
 
-`get_espn_league` is the first tool built on this foundation; later tickets
-add the rest of the catalog (rosters, standings, matchups, draft,
-transactions, free agents) as siblings in this module.
+`get_espn_league` is the first tool built on this foundation; `get_espn_rosters`
+and `get_espn_standings` are next. Later tickets add the rest of the catalog
+(matchups, draft, transactions, free agents) as siblings in this module.
 """
 
 import logging
@@ -104,6 +104,11 @@ FANTASY_BASE_ENDPOINT = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/"
 _LEAGUE_HISTORY_BOUNDARY_YEAR = 2018
 
 
+def _resolve_year(year: int | None) -> int:
+    """Every league-scoped tool defaults `year` to the current year the same way (ADR 0004)."""
+    return year if year is not None else datetime.now().year
+
+
 def _espn_auth_cookies() -> dict[str, str]:
     """
     ESPN_S2/ESPN_SWID as request cookies, under the names ESPN expects.
@@ -119,6 +124,7 @@ async def _fetch_espn_league_view(
     league_id: str,
     year: int,
     views: list[str],
+    extra_params: list[tuple[str, str | int | float | bool | None]] | None = None,
 ) -> dict[str, Any]:
     """
     Fetch one or more `view=` slices of the ESPN league endpoint.
@@ -135,6 +141,9 @@ async def _fetch_espn_league_view(
         year: The season year; selects which URL format applies.
         views: `view=` query values to request (ESPN allows repeating this
             query param to request multiple views in one call).
+        extra_params: Additional query params appended after `view`/`seasonId`
+            (e.g. `scoringPeriodId` to scope a roster fetch to one week —
+            docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §2).
 
     Returns:
         The inner league object, whichever envelope ESPN actually sent.
@@ -150,6 +159,8 @@ async def _fetch_espn_league_view(
     ]
     if is_pre_boundary:
         params.append(("seasonId", str(year)))
+    if extra_params:
+        params.extend(extra_params)
 
     response = await client.get(
         url,
@@ -189,7 +200,7 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         - error: Error message (if any)
         - error_type: Type of error (if any)
     """
-    resolved_year = year if year is not None else datetime.now().year
+    resolved_year = _resolve_year(year)
 
     async with create_http_client() as client:
         league_data = await _fetch_espn_league_view(
@@ -200,6 +211,112 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         )
 
     return create_success_response({"league": league_data})
+
+
+@handle_http_errors(
+    default_data={"rosters": []},
+    operation_name="fetching ESPN league rosters",
+)
+@handle_espn_auth_errors
+async def get_espn_rosters(
+    league_id: str, week: int | None = None, year: int | None = None
+) -> dict:
+    """
+    Get every team's roster for an ESPN fantasy league.
+
+    Requests `mRoster` (roster contents) and `mTeam` (team metadata) together,
+    matching `mRoster`+`mTeam` in the catalog's §2 — ESPN splits "team info"
+    and "roster contents" into separate view flags even though both end up
+    nested under the same `teams[]` entries. Roster contents are week-scoped:
+    passing `week` adds `scoringPeriodId` to pull that week's roster instead
+    of the current one (docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §2). Transparently
+    spans the 2018 leagueHistory boundary via the shared helper.
+
+    Args:
+        league_id: The ESPN league ID.
+        week: Optional week (scoring period) to scope the roster to; defaults
+            to the current roster state if omitted.
+        year: Season year; defaults to the current year if omitted.
+
+    Returns:
+        A dictionary containing:
+        - rosters: One entry per team (team metadata + `roster.entries`), as
+          ESPN returns them
+        - success: Whether the request was successful
+        - error: Error message (if any)
+        - error_type: Type of error (if any)
+    """
+    resolved_year = _resolve_year(year)
+    extra_params: list[tuple[str, str | int | float | bool | None]] | None = (
+        [("scoringPeriodId", week)] if week is not None else None
+    )
+
+    async with create_http_client() as client:
+        league_data = await _fetch_espn_league_view(
+            client,
+            league_id=league_id,
+            year=resolved_year,
+            views=["mRoster", "mTeam"],
+            extra_params=extra_params,
+        )
+
+    return create_success_response({"rosters": league_data.get("teams", [])})
+
+
+def _standings_sort_key(team: dict[str, Any]) -> int:
+    """
+    Based on `espn-api`'s `League.standings()` sort key (`league.py:513-515`,
+    `team.py:1054-1055`, catalog §4): a team's final rank if ESPN has computed
+    one, falling back to its (projected) playoff seed otherwise. Diverges from
+    that source in one place — `rankFinal`/`rankCalculatedFinal` are both
+    nullable, and the cited source doesn't guard that, so this adds an
+    explicit `or 0` fallback rather than risking `None` reaching `sorted()`.
+    """
+    final_standing = team.get("rankFinal") or team.get("rankCalculatedFinal") or 0
+    return final_standing if final_standing != 0 else team.get("playoffSeed", 0)
+
+
+@handle_http_errors(
+    default_data={"standings": []},
+    operation_name="fetching ESPN league standings",
+)
+@handle_espn_auth_errors
+async def get_espn_standings(league_id: str, year: int | None = None) -> dict:
+    """
+    Get an ESPN fantasy league's standings.
+
+    ESPN has no dedicated standings endpoint (docs/ESPN_FANTASY_ENDPOINT_CATALOG.md
+    §4): `mStandings` only augments fields already inside each `teams[]` entry
+    (`playoffSeed`, `rankFinal`, `rankCalculatedFinal`, ...). This tool requests
+    `mStandings`+`mTeam` and replicates `espn-api`'s client-side
+    `League.standings()` sort once, here, so callers of `get_espn_rosters`
+    never need to reimplement it (ADR 0004).
+
+    Args:
+        league_id: The ESPN league ID.
+        year: Season year; defaults to the current year if omitted.
+
+    Returns:
+        A dictionary containing:
+        - standings: Teams sorted by final/projected rank (best first), as
+          ESPN returns them
+        - success: Whether the request was successful
+        - error: Error message (if any)
+        - error_type: Type of error (if any)
+    """
+    resolved_year = _resolve_year(year)
+
+    async with create_http_client() as client:
+        league_data = await _fetch_espn_league_view(
+            client,
+            league_id=league_id,
+            year=resolved_year,
+            views=["mStandings", "mTeam"],
+        )
+
+    standings = sorted(league_data.get("teams", []), key=_standings_sort_key)
+
+    return create_success_response({"standings": standings})
 
 
 @handle_http_errors(
