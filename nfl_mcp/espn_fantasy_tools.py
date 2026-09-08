@@ -18,6 +18,7 @@ add the rest of the catalog (rosters, standings, matchups, draft,
 transactions, free agents) as siblings in this module.
 """
 
+import json
 import logging
 import os
 from collections.abc import Callable
@@ -119,6 +120,7 @@ async def _fetch_espn_league_view(
     league_id: str,
     year: int,
     views: list[str],
+    extra_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """
     Fetch one or more `view=` slices of the ESPN league endpoint.
@@ -135,6 +137,8 @@ async def _fetch_espn_league_view(
         year: The season year; selects which URL format applies.
         views: `view=` query values to request (ESPN allows repeating this
             query param to request multiple views in one call).
+        extra_headers: Additional request headers (e.g. `x-fantasy-filter`
+            for matchup-period scoping), merged over the base ESPN headers.
 
     Returns:
         The inner league object, whichever envelope ESPN actually sent.
@@ -151,16 +155,30 @@ async def _fetch_espn_league_view(
     if is_pre_boundary:
         params.append(("seasonId", str(year)))
 
+    headers = get_http_headers("espn_fantasy")
+    if extra_headers:
+        headers = {**headers, **extra_headers}
+
     response = await client.get(
         url,
         params=params,
-        headers=get_http_headers("espn_fantasy"),
+        headers=headers,
         cookies=_espn_auth_cookies(),
     )
     response.raise_for_status()
     data = response.json()
 
     return data[0] if isinstance(data, list) else data
+
+
+def _matchup_period_filter_header(week: int) -> dict[str, str]:
+    """
+    Build the `x-fantasy-filter` header that scopes a schedule request to
+    one matchup period, mirroring `espn-api`'s `box_scores()`
+    (docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §3).
+    """
+    filters = {"schedule": {"filterMatchupPeriodIds": {"value": [week]}}}
+    return {"x-fantasy-filter": json.dumps(filters)}
 
 
 @handle_http_errors(
@@ -200,6 +218,107 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         )
 
     return create_success_response({"league": league_data})
+
+
+@handle_http_errors(
+    default_data={"scoreboard": []},
+    operation_name="fetching ESPN scoreboard",
+)
+@handle_espn_auth_errors
+async def get_espn_scoreboard(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+    """
+    Get final scores for an ESPN fantasy league's matchups.
+
+    Requests only the `mMatchupScore` view — final scores only, no
+    per-player lineup/box-score detail (ADR 0004; see get_espn_matchups for
+    the full box-score tool covering the same catalog category,
+    docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §3). When `week` is given, scopes
+    the request to that matchup period via ESPN's `x-fantasy-filter`
+    header and also filters the returned schedule client-side, so the
+    filter is honored even if ESPN doesn't enforce the header for this
+    view. Transparently spans the 2018 leagueHistory boundary via the
+    shared helper.
+
+    Args:
+        league_id: The ESPN league ID.
+        week: Matchup period (week) to filter to; omit for the full
+            season's schedule.
+        year: Season year; defaults to the current year if omitted.
+
+    Returns:
+        A dictionary containing:
+        - scoreboard: List of matchup score entries (ESPN's `schedule` array)
+        - success: Whether the request was successful
+        - error: Error message (if any)
+        - error_type: Type of error (if any)
+    """
+    resolved_year = year if year is not None else datetime.now().year
+    extra_headers = _matchup_period_filter_header(week) if week is not None else None
+
+    async with create_http_client() as client:
+        league_data = await _fetch_espn_league_view(
+            client,
+            league_id=league_id,
+            year=resolved_year,
+            views=["mMatchupScore"],
+            extra_headers=extra_headers,
+        )
+
+    schedule = league_data.get("schedule", [])
+    if week is not None:
+        schedule = [m for m in schedule if m.get("matchupPeriodId") == week]
+
+    return create_success_response({"scoreboard": schedule})
+
+
+@handle_http_errors(
+    default_data={"matchups": []},
+    operation_name="fetching ESPN matchups",
+)
+@handle_espn_auth_errors
+async def get_espn_matchups(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+    """
+    Get full box-score/lineup detail for an ESPN fantasy league's matchups.
+
+    Requests `mMatchup`+`mScoreboard` together — each matchup includes
+    per-side lineup/box-score detail, not just final scores (ADR 0004; see
+    get_espn_scoreboard for the lighter scores-only tool covering the same
+    catalog category, docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §3). When
+    `week` is given, scopes the request to that matchup period via ESPN's
+    `x-fantasy-filter` header and also filters the returned schedule
+    client-side. Transparently spans the 2018 leagueHistory boundary via
+    the shared helper.
+
+    Args:
+        league_id: The ESPN league ID.
+        week: Matchup period (week) to filter to; omit for the full
+            season's schedule.
+        year: Season year; defaults to the current year if omitted.
+
+    Returns:
+        A dictionary containing:
+        - matchups: List of matchup entries with full box-score/lineup detail
+        - success: Whether the request was successful
+        - error: Error message (if any)
+        - error_type: Type of error (if any)
+    """
+    resolved_year = year if year is not None else datetime.now().year
+    extra_headers = _matchup_period_filter_header(week) if week is not None else None
+
+    async with create_http_client() as client:
+        league_data = await _fetch_espn_league_view(
+            client,
+            league_id=league_id,
+            year=resolved_year,
+            views=["mMatchup", "mScoreboard"],
+            extra_headers=extra_headers,
+        )
+
+    schedule = league_data.get("schedule", [])
+    if week is not None:
+        schedule = [m for m in schedule if m.get("matchupPeriodId") == week]
+
+    return create_success_response({"matchups": schedule})
 
 
 @handle_http_errors(
