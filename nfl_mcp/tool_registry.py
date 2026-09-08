@@ -83,6 +83,8 @@ def get_all_tools() -> list[Callable]:
 
         # ESPN Fantasy Tools
         get_espn_league,
+        get_espn_rosters,
+        get_espn_standings,
         get_espn_player_news,
 
         # Web Tools
@@ -421,6 +423,47 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         return await espn_fantasy_tools.get_espn_league(league_id, year)
     except ValueError as e:
         return {"league": None, "success": False, "error": f"Invalid league_id: {e!s}"}
+
+
+@timing_decorator("get_espn_rosters", tool_type="espn_fantasy")
+async def get_espn_rosters(
+    league_id: str, week: int | None = None, year: int | None = None
+) -> dict:
+    """Get every team's roster for an ESPN fantasy league.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        week (int, optional): Week to scope the roster to; defaults to the current roster.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {rosters: [...], success, error?, error_type?}
+    Example: get_espn_rosters(league_id="1234", week=5, year=2023)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        if week is not None:
+            week = validate_numeric_input(
+                week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
+            )
+        return await espn_fantasy_tools.get_espn_rosters(league_id, week, year)
+    except ValueError as e:
+        return {"rosters": [], "success": False, "error": f"Invalid input: {e!s}"}
+
+
+@timing_decorator("get_espn_standings", tool_type="espn_fantasy")
+async def get_espn_standings(league_id: str, year: int | None = None) -> dict:
+    """Get an ESPN fantasy league's standings.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {standings: [...], success, error?, error_type?}
+    Example: get_espn_standings(league_id="1234", year=2023)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        return await espn_fantasy_tools.get_espn_standings(league_id, year)
+    except ValueError as e:
+        return {"standings": [], "success": False, "error": f"Invalid league_id: {e!s}"}
 
 
 @timing_decorator("get_espn_player_news", tool_type="espn_fantasy")
