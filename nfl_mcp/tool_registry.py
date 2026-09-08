@@ -83,6 +83,8 @@ def get_all_tools() -> list[Callable]:
 
         # ESPN Fantasy Tools
         get_espn_league,
+        get_espn_players,
+        get_espn_free_agents,
         get_espn_rosters,
         get_espn_standings,
         get_espn_scoreboard,
@@ -427,6 +429,40 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         return await espn_fantasy_tools.get_espn_league(league_id, year)
     except ValueError as e:
         return {"league": None, "success": False, "error": f"Invalid league_id: {e!s}"}
+
+
+@timing_decorator("get_espn_players", tool_type="espn_fantasy")
+async def get_espn_players(year: int | None = None) -> dict:
+    """Get the full ESPN pro-player pool for a season, unscoped to any league.
+
+    Parameters:
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {players: [...], success, error?, error_type?}
+    Example: get_espn_players(year=2024)
+    """
+    return await espn_fantasy_tools.get_espn_players(year)
+
+
+@timing_decorator("get_espn_free_agents", tool_type="espn_fantasy")
+async def get_espn_free_agents(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+    """Get free-agent and waiver-available players for an ESPN fantasy league.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        week (int, optional): Scoring period (week) to scope free agency to.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {players: [...], success, error?, error_type?}
+    Example: get_espn_free_agents(league_id="1234", week=3, year=2023)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        if week is not None:
+            week = validate_numeric_input(
+                week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
+            )
+        return await espn_fantasy_tools.get_espn_free_agents(league_id, week, year)
+    except ValueError as e:
+        return {"players": [], "success": False, "error": f"Invalid input: {e!s}"}
 
 
 @timing_decorator("get_espn_rosters", tool_type="espn_fantasy")

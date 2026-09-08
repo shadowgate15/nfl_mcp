@@ -1,7 +1,8 @@
 """
 Tests for espn_fantasy_tools.py: the @handle_espn_auth_errors decorator
-foundation, and the tools built on it (get_espn_league, get_espn_rosters,
-get_espn_standings, get_espn_scoreboard, get_espn_matchups, get_espn_draft,
+foundation, and the tools built on it (get_espn_league, get_espn_players,
+get_espn_free_agents, get_espn_rosters, get_espn_standings,
+get_espn_scoreboard, get_espn_matchups, get_espn_draft,
 get_espn_transactions, get_espn_player_news).
 
 Covers @handle_espn_auth_errors against a trivial wrapped function:
@@ -14,6 +15,18 @@ Covers get_espn_league:
   normalizing to the same output shape
 - a non-401/403 HTTP failure (500) falls through to @handle_http_errors
 - registration in tool_registry.get_all_tools()
+
+Covers get_espn_players (no cookies, `/players` endpoint, catalog §7b):
+- a bare-array raw response and a wrapped {"players": [...]} raw response
+  normalize to the same output shape
+- no ESPN_S2/ESPN_SWID needed
+- HTTP error path
+
+Covers get_espn_free_agents (cookie-gated, `kona_player_info` view, catalog
+§7a):
+- success path, including the x-fantasy-filter header and scoringPeriodId
+- missing-credentials short-circuit
+- HTTP error path
 
 Covers get_espn_rosters:
 - success path on the 2018+ object-wrapped envelope, with a week passed
@@ -68,9 +81,11 @@ from nfl_mcp.errors import ErrorType
 from nfl_mcp.espn_errors import classify_espn_auth_error
 from nfl_mcp.espn_fantasy_tools import (
     get_espn_draft,
+    get_espn_free_agents,
     get_espn_league,
     get_espn_matchups,
     get_espn_player_news,
+    get_espn_players,
     get_espn_rosters,
     get_espn_scoreboard,
     get_espn_standings,
@@ -301,6 +316,220 @@ class TestGetEspnLeague:
 
         tool_names = [t.__name__ for t in get_all_tools()]
         assert "get_espn_league" in tool_names
+
+
+class TestGetEspnPlayers:
+    """Test get_espn_players, the cookie-free full pro-player pool tool."""
+
+    @pytest.mark.asyncio
+    async def test_bare_array_envelope_normalizes(self, monkeypatch):
+        """A bare top-level JSON array (the raw /players shape) normalizes to {"players": [...]}."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [
+            {"id": 1, "fullName": "Israel Abanikanda"},
+            {"id": 2, "fullName": "Some Player"},
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players(year=2024)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players
+
+        call_args = mock_client.get.call_args
+        assert call_args.args[0] == (
+            "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2024/players"
+        )
+        assert call_args.kwargs["params"] == [("view", "players_wl")]
+        assert "cookies" not in call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_wrapped_envelope_normalizes_to_same_shape(self, monkeypatch):
+        """A {"players": [...]} raw response normalizes to the identical output shape as the bare-array case."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": 1, "fullName": "Israel Abanikanda"}]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players(year=2024)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players
+
+    @pytest.mark.asyncio
+    async def test_no_credentials_needed(self, monkeypatch):
+        """get_espn_players succeeds with no ESPN_S2/ESPN_SWID configured at all."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = []
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players()
+
+        assert result["success"] is True
+        assert result["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_http_error_path(self, monkeypatch):
+        """A non-2xx response is surfaced as a generic HTTP error via @handle_http_errors."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        response = httpx.Response(500, request=httpx.Request("GET", "https://example.com"))
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=response.request, response=response
+        )
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players()
+
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.HTTP
+        assert result["players"] == []
+
+    def test_registered_in_tool_registry(self):
+        """get_espn_players is present in tool_registry.get_all_tools()."""
+        from nfl_mcp.tool_registry import get_all_tools
+
+        tool_names = [t.__name__ for t in get_all_tools()]
+        assert "get_espn_players" in tool_names
+
+
+class TestGetEspnFreeAgents:
+    """Test get_espn_free_agents, the cookie-gated league-scoped free-agent tool."""
+
+    @pytest.mark.asyncio
+    async def test_success_with_week(self, monkeypatch):
+        """A week scopes the request via scoringPeriodId, and the filter header restricts to FREEAGENT/WAIVERS."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        raw_players = [{"id": 1, "player": {"fullName": "Free Agent Guy"}, "onTeamId": 0}]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", week=3, year=2023)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players
+
+        call_args = mock_client.get.call_args
+        assert call_args.args[0] == (
+            "https://lm-api-reads.fantasy.espn.com/apis/v3/games/"
+            "ffl/seasons/2023/segments/0/leagues/1234"
+        )
+        assert call_args.kwargs["params"] == [
+            ("view", "kona_player_info"),
+            ("scoringPeriodId", 3),
+        ]
+        assert call_args.kwargs["cookies"] == {"espn_s2": "some-cookie", "SWID": "some-swid"}
+        assert "x-fantasy-filter" in call_args.kwargs["headers"]
+
+    @pytest.mark.asyncio
+    async def test_success_without_week_omits_scoring_period(self, monkeypatch):
+        """With week=None, scoringPeriodId is left out of the request entirely."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": []}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023)
+
+        assert result["success"] is True
+
+        call_args = mock_client.get.call_args
+        assert call_args.kwargs["params"] == [("view", "kona_player_info")]
+
+    @pytest.mark.asyncio
+    async def test_missing_credentials_short_circuits(self, monkeypatch):
+        """Missing ESPN credentials short-circuit before any HTTP call is made."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client") as mock_create_client:
+            result = await get_espn_free_agents("1234", week=3, year=2023)
+
+        mock_create_client.assert_not_called()
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.ESPN_CREDENTIALS_NOT_CONFIGURED
+
+    @pytest.mark.asyncio
+    async def test_http_error_path(self, monkeypatch):
+        """A non-401/403 HTTP failure (500) falls through to @handle_http_errors."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        response = httpx.Response(500, request=httpx.Request("GET", "https://example.com"))
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=response.request, response=response
+        )
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023)
+
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.HTTP
+        assert result["players"] == []
+
+    @pytest.mark.asyncio
+    async def test_401_delegates_to_classifier(self, monkeypatch):
+        """A 401 is classified via classify_espn_auth_error, not raised."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        response = httpx.Response(401, request=httpx.Request("GET", "https://example.com"))
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "401", request=response.request, response=response
+        )
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023)
+
+        assert result["success"] is False
+        assert result["error_type"] == ErrorType.ESPN_EXPIRED_COOKIES
+
+    def test_registered_in_tool_registry(self):
+        """get_espn_free_agents is present in tool_registry.get_all_tools()."""
+        from nfl_mcp.tool_registry import get_all_tools
+
+        tool_names = [t.__name__ for t in get_all_tools()]
+        assert "get_espn_free_agents" in tool_names
 
 
 class TestGetEspnRosters:
