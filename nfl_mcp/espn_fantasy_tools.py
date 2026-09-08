@@ -104,6 +104,11 @@ FANTASY_BASE_ENDPOINT = "https://lm-api-reads.fantasy.espn.com/apis/v3/games/"
 _LEAGUE_HISTORY_BOUNDARY_YEAR = 2018
 
 
+def _resolve_year(year: int | None) -> int:
+    """Every league-scoped tool defaults `year` to the current year the same way (ADR 0004)."""
+    return year if year is not None else datetime.now().year
+
+
 def _espn_auth_cookies() -> dict[str, str]:
     """
     ESPN_S2/ESPN_SWID as request cookies, under the names ESPN expects.
@@ -195,7 +200,7 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         - error: Error message (if any)
         - error_type: Type of error (if any)
     """
-    resolved_year = year if year is not None else datetime.now().year
+    resolved_year = _resolve_year(year)
 
     async with create_http_client() as client:
         league_data = await _fetch_espn_league_view(
@@ -241,7 +246,7 @@ async def get_espn_rosters(
         - error: Error message (if any)
         - error_type: Type of error (if any)
     """
-    resolved_year = year if year is not None else datetime.now().year
+    resolved_year = _resolve_year(year)
     extra_params: list[tuple[str, str | int | float | bool | None]] | None = (
         [("scoringPeriodId", week)] if week is not None else None
     )
@@ -260,11 +265,12 @@ async def get_espn_rosters(
 
 def _standings_sort_key(team: dict[str, Any]) -> int:
     """
-    Replicates `espn-api`'s `League.standings()` sort key (`league.py:513-515`,
+    Based on `espn-api`'s `League.standings()` sort key (`league.py:513-515`,
     `team.py:1054-1055`, catalog §4): a team's final rank if ESPN has computed
-    one, falling back to its (projected) playoff seed otherwise. `rankFinal`
-    and `rankCalculatedFinal` are both nullable, so this defensively falls back
-    to `0` rather than propagating `None` into a sort comparison.
+    one, falling back to its (projected) playoff seed otherwise. Diverges from
+    that source in one place — `rankFinal`/`rankCalculatedFinal` are both
+    nullable, and the cited source doesn't guard that, so this adds an
+    explicit `or 0` fallback rather than risking `None` reaching `sorted()`.
     """
     final_standing = team.get("rankFinal") or team.get("rankCalculatedFinal") or 0
     return final_standing if final_standing != 0 else team.get("playoffSeed", 0)
@@ -298,7 +304,7 @@ async def get_espn_standings(league_id: str, year: int | None = None) -> dict:
         - error: Error message (if any)
         - error_type: Type of error (if any)
     """
-    resolved_year = year if year is not None else datetime.now().year
+    resolved_year = _resolve_year(year)
 
     async with create_http_client() as client:
         league_data = await _fetch_espn_league_view(
