@@ -88,6 +88,7 @@ def get_all_tools() -> list[Callable]:
         get_espn_scoreboard,
         get_espn_matchups,
         get_espn_draft,
+        get_espn_transactions,
         get_espn_player_news,
 
         # Web Tools
@@ -528,6 +529,34 @@ async def get_espn_draft(league_id: str, year: int | None = None) -> dict:
         return await espn_fantasy_tools.get_espn_draft(league_id, year)
     except ValueError as e:
         return {"draft": None, "success": False, "error": f"Invalid league_id: {e!s}"}
+
+
+@timing_decorator("get_espn_transactions", tool_type="espn_fantasy")
+async def get_espn_transactions(
+    league_id: str,
+    week: int | None = None,
+    types: list[str] | None = None,
+    year: int | None = None,
+) -> dict:
+    """Get an ESPN fantasy league's transaction/waiver activity log.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        week (int, optional): Scoring period to fetch transactions for; ESPN's default period applies if omitted.
+        types (list[str], optional): Transaction type strings to filter to (e.g. ["WAIVER", "TRADE"]).
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {transactions: [...], total_transactions, success, error?, error_type?}
+    Example: get_espn_transactions(league_id="1234", week=3, types=["WAIVER"])
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        if week is not None:
+            week = validate_numeric_input(
+                week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
+            )
+        return await espn_fantasy_tools.get_espn_transactions(league_id, week=week, types=types, year=year)
+    except ValueError as e:
+        return {"transactions": [], "total_transactions": 0, "success": False, "error": f"Invalid input: {e!s}"}
 
 
 @timing_decorator("get_espn_player_news", tool_type="espn_fantasy")
