@@ -16,6 +16,7 @@ from . import (
     cbs_fantasy_tools,
     coaching_tools,
     draft_tools,
+    espn_fantasy_tools,
     faab_tools,
     handcuff_tools,
     lineup_optimizer_tools,
@@ -79,6 +80,18 @@ def get_all_tools() -> list[Callable]:
         get_cbs_player_news,
         get_cbs_projections,
         get_cbs_expert_picks,
+
+        # ESPN Fantasy Tools
+        get_espn_league,
+        get_espn_players,
+        get_espn_free_agents,
+        get_espn_rosters,
+        get_espn_standings,
+        get_espn_scoreboard,
+        get_espn_matchups,
+        get_espn_draft,
+        get_espn_transactions,
+        get_espn_player_news,
 
         # Web Tools
         crawl_url,
@@ -395,6 +408,211 @@ async def get_cbs_expert_picks(week: int | None = None) -> dict:
     except Exception:
         week_i = None
     return await cbs_fantasy_tools.get_cbs_expert_picks(week=week_i)
+
+
+# =============================================================================
+# ESPN FANTASY TOOLS
+# =============================================================================
+
+@timing_decorator("get_espn_league", tool_type="espn_fantasy")
+async def get_espn_league(league_id: str, year: int | None = None) -> dict:
+    """Get an ESPN fantasy league's settings and metadata.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {league, success, error?, error_type?}
+    Example: get_espn_league(league_id="1234", year=2018)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        return await espn_fantasy_tools.get_espn_league(league_id, year)
+    except ValueError as e:
+        return {"league": None, "success": False, "error": f"Invalid league_id: {e!s}"}
+
+
+@timing_decorator("get_espn_players", tool_type="espn_fantasy")
+async def get_espn_players(year: int | None = None) -> dict:
+    """Get the full ESPN pro-player pool for a season, unscoped to any league.
+
+    Parameters:
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {players: [...], success, error?, error_type?}
+    Example: get_espn_players(year=2024)
+    """
+    return await espn_fantasy_tools.get_espn_players(year)
+
+
+@timing_decorator("get_espn_free_agents", tool_type="espn_fantasy")
+async def get_espn_free_agents(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+    """Get free-agent and waiver-available players for an ESPN fantasy league.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        week (int, optional): Scoring period (week) to scope free agency to.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {players: [...], success, error?, error_type?}
+    Example: get_espn_free_agents(league_id="1234", week=3, year=2023)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        if week is not None:
+            week = validate_numeric_input(
+                week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
+            )
+        return await espn_fantasy_tools.get_espn_free_agents(league_id, week, year)
+    except ValueError as e:
+        return {"players": [], "success": False, "error": f"Invalid input: {e!s}"}
+
+
+@timing_decorator("get_espn_rosters", tool_type="espn_fantasy")
+async def get_espn_rosters(
+    league_id: str, week: int | None = None, year: int | None = None
+) -> dict:
+    """Get every team's roster for an ESPN fantasy league.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        week (int, optional): Week to scope the roster to; defaults to the current roster.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {rosters: [...], success, error?, error_type?}
+    Example: get_espn_rosters(league_id="1234", week=5, year=2023)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        if week is not None:
+            week = validate_numeric_input(
+                week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
+            )
+        return await espn_fantasy_tools.get_espn_rosters(league_id, week, year)
+    except ValueError as e:
+        return {"rosters": [], "success": False, "error": f"Invalid input: {e!s}"}
+
+
+@timing_decorator("get_espn_standings", tool_type="espn_fantasy")
+async def get_espn_standings(league_id: str, year: int | None = None) -> dict:
+    """Get an ESPN fantasy league's standings.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {standings: [...], success, error?, error_type?}
+    Example: get_espn_standings(league_id="1234", year=2023)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        return await espn_fantasy_tools.get_espn_standings(league_id, year)
+    except ValueError as e:
+        return {"standings": [], "success": False, "error": f"Invalid league_id: {e!s}"}
+
+
+@timing_decorator("get_espn_scoreboard", tool_type="espn_fantasy")
+async def get_espn_scoreboard(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+    """Get final scores for an ESPN fantasy league's matchups.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        week (int, optional): Matchup period (week) to filter to; omits for the full season's schedule.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {scoreboard: [...], success, error?, error_type?}
+    Example: get_espn_scoreboard(league_id="1234", week=3, year=2018)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        if week is not None:
+            week = validate_numeric_input(
+                week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
+            )
+        return await espn_fantasy_tools.get_espn_scoreboard(league_id, week, year)
+    except ValueError as e:
+        return {"scoreboard": [], "success": False, "error": f"Invalid input: {e!s}"}
+
+
+@timing_decorator("get_espn_matchups", tool_type="espn_fantasy")
+async def get_espn_matchups(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+    """Get full box-score/lineup detail for an ESPN fantasy league's matchups.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        week (int, optional): Matchup period (week) to filter to; omits for the full season's schedule.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {matchups: [...], success, error?, error_type?}
+    Example: get_espn_matchups(league_id="1234", week=3, year=2018)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        if week is not None:
+            week = validate_numeric_input(
+                week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
+            )
+        return await espn_fantasy_tools.get_espn_matchups(league_id, week, year)
+    except ValueError as e:
+        return {"matchups": [], "success": False, "error": f"Invalid input: {e!s}"}
+
+
+@timing_decorator("get_espn_draft", tool_type="espn_fantasy")
+async def get_espn_draft(league_id: str, year: int | None = None) -> dict:
+    """Get an ESPN fantasy league's draft results.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {draft, success, error?, error_type?}
+    Example: get_espn_draft(league_id="1234", year=2018)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        return await espn_fantasy_tools.get_espn_draft(league_id, year)
+    except ValueError as e:
+        return {"draft": None, "success": False, "error": f"Invalid league_id: {e!s}"}
+
+
+@timing_decorator("get_espn_transactions", tool_type="espn_fantasy")
+async def get_espn_transactions(
+    league_id: str,
+    week: int | None = None,
+    types: list[str] | None = None,
+    year: int | None = None,
+) -> dict:
+    """Get an ESPN fantasy league's transaction/waiver activity log.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        week (int, optional): Scoring period to fetch transactions for; ESPN's default period applies if omitted.
+        types (list[str], optional): Transaction type strings to filter to (e.g. ["WAIVER", "TRADE"]).
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {transactions: [...], total_transactions, success, error?, error_type?}
+    Example: get_espn_transactions(league_id="1234", week=3, types=["WAIVER"])
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        if week is not None:
+            week = validate_numeric_input(
+                week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
+            )
+        return await espn_fantasy_tools.get_espn_transactions(league_id, week=week, types=types, year=year)
+    except ValueError as e:
+        return {"transactions": [], "total_transactions": 0, "success": False, "error": f"Invalid input: {e!s}"}
+
+
+@timing_decorator("get_espn_player_news", tool_type="espn_fantasy")
+async def get_espn_player_news(player_id: int | None = None, limit: int | None = None) -> dict:
+    """Fetch the latest ESPN fantasy player news, optionally filtered to one player.
+
+    Parameters:
+        player_id (int, optional): ESPN player ID to filter news to a single player.
+        limit (int, optional): Max number of news items to return.
+    Returns: {news: [...], total_news, success, error?}
+    Example: get_espn_player_news(player_id=3139477, limit=10)
+    """
+    try:
+        if player_id is not None:
+            player_id = validate_numeric_input(player_id, min_val=1, required=False)
+        if limit is not None:
+            limit = validate_numeric_input(limit, min_val=1, max_val=100, required=False)
+    except ValueError as e:
+        return {"news": [], "total_news": 0, "success": False, "error": f"Invalid input: {e!s}"}
+    return await espn_fantasy_tools.get_espn_player_news(player_id=player_id, limit=limit)
 
 
 # =============================================================================

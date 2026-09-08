@@ -45,6 +45,12 @@ dev = [
 agent-evals = [
     "anthropic",
 ]
+# Playwright for scripts/espn_cookie_pull.py (docs/adr/0002). Kept out of `dev`
+# so its browser-binary download isn't part of every contributor's normal
+# `uv sync`; install on-demand with `uv sync --group espn`.
+espn = [
+    "playwright>=1.55.0",
+]
 
 [tool.uv]
 # fastmcp is still a beta (4.0.0bN); scope prerelease resolution to just that
