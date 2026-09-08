@@ -169,7 +169,7 @@ def _espn_news() -> str:
 # build here means ESPN's shape broke or the cookies expired (ADR 0001/0003)
 # ---------------------------------------------------------------------------
 # Not a secret, matching every check above. Maintainer: replace with your league ID.
-_ESPN_FANTASY_LEAGUE_ID = "REPLACE_WITH_MAINTAINER_ESPN_LEAGUE_ID"
+_ESPN_FANTASY_LEAGUE_ID = "1804399283"
 
 
 @check("espn_fantasy.league", critical=True)
