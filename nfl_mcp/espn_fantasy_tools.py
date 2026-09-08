@@ -13,9 +13,10 @@ without callers ever seeing it:
     @handle_espn_auth_errors
     async def get_espn_league(...): ...
 
-`get_espn_league` is the first tool built on this foundation; later tickets
-add the rest of the catalog (rosters, standings, matchups, draft,
-transactions, free agents) as siblings in this module.
+`get_espn_league` is the first tool built on this foundation; `get_espn_scoreboard`
+and `get_espn_matchups` are the next (§3 of the catalog); later tickets add the
+rest (rosters, standings, draft, transactions, free agents) as siblings in this
+module.
 """
 
 import json
@@ -181,6 +182,11 @@ def _matchup_period_filter_header(week: int) -> dict[str, str]:
     return {"x-fantasy-filter": json.dumps(filters)}
 
 
+def _filter_schedule_to_week(schedule: list[dict[str, Any]], week: int) -> list[dict[str, Any]]:
+    """Keep only the schedule entries for one matchup period (week)."""
+    return [matchup for matchup in schedule if matchup.get("matchupPeriodId") == week]
+
+
 @handle_http_errors(
     default_data={"league": None},
     operation_name="fetching ESPN league settings",
@@ -232,12 +238,13 @@ async def get_espn_scoreboard(league_id: str, week: int | None = None, year: int
     Requests only the `mMatchupScore` view — final scores only, no
     per-player lineup/box-score detail (ADR 0004; see get_espn_matchups for
     the full box-score tool covering the same catalog category,
-    docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §3). When `week` is given, scopes
-    the request to that matchup period via ESPN's `x-fantasy-filter`
-    header and also filters the returned schedule client-side, so the
-    filter is honored even if ESPN doesn't enforce the header for this
-    view. Transparently spans the 2018 leagueHistory boundary via the
-    shared helper.
+    docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §3). When `week` is given, the
+    returned schedule is filtered client-side to that matchup period,
+    mirroring `espn-api`'s own `scoreboard()` (catalog §3), which filters
+    the same way rather than via ESPN's `x-fantasy-filter` header — unlike
+    `box_scores()`, the catalog never confirms that header scopes this
+    lighter view. Transparently spans the 2018 leagueHistory boundary via
+    the shared helper.
 
     Args:
         league_id: The ESPN league ID.
@@ -253,7 +260,6 @@ async def get_espn_scoreboard(league_id: str, week: int | None = None, year: int
         - error_type: Type of error (if any)
     """
     resolved_year = year if year is not None else datetime.now().year
-    extra_headers = _matchup_period_filter_header(week) if week is not None else None
 
     async with create_http_client() as client:
         league_data = await _fetch_espn_league_view(
@@ -261,12 +267,11 @@ async def get_espn_scoreboard(league_id: str, week: int | None = None, year: int
             league_id=league_id,
             year=resolved_year,
             views=["mMatchupScore"],
-            extra_headers=extra_headers,
         )
 
     schedule = league_data.get("schedule", [])
     if week is not None:
-        schedule = [m for m in schedule if m.get("matchupPeriodId") == week]
+        schedule = _filter_schedule_to_week(schedule, week)
 
     return create_success_response({"scoreboard": schedule})
 
@@ -316,7 +321,7 @@ async def get_espn_matchups(league_id: str, week: int | None = None, year: int |
 
     schedule = league_data.get("schedule", [])
     if week is not None:
-        schedule = [m for m in schedule if m.get("matchupPeriodId") == week]
+        schedule = _filter_schedule_to_week(schedule, week)
 
     return create_success_response({"matchups": schedule})
 

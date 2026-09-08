@@ -15,10 +15,12 @@ Covers get_espn_league:
 - registration in tool_registry.get_all_tools()
 
 Covers get_espn_scoreboard and get_espn_matchups:
-- success path with no `week` filter (full season's schedule, no
-  x-fantasy-filter header sent)
-- success path with a `week` filter (x-fantasy-filter header sent, and the
-  returned schedule filtered client-side to that matchup period)
+- success path with no `week` filter (full season's schedule)
+- success path with a `week` filter (returned schedule filtered
+  client-side to that matchup period); get_espn_matchups additionally
+  sends the x-fantasy-filter header (mirrors box_scores()), while
+  get_espn_scoreboard does not (mirrors scoreboard() — the catalog never
+  confirms that header scopes the lighter mMatchupScore view)
 - the two tools request different `view=` params (mMatchupScore vs.
   mMatchup+mScoreboard) but share the same _fetch_espn_league_view helper
 - a non-401/403 HTTP failure (500) falls through to @handle_http_errors
@@ -302,8 +304,10 @@ class TestGetEspnScoreboard:
 
     @pytest.mark.asyncio
     async def test_success_with_week_filter(self, monkeypatch):
-        """With week given, x-fantasy-filter scopes the request and the
-        returned schedule is filtered client-side to that matchup period."""
+        """With week given, the returned schedule is filtered client-side to
+        that matchup period (no x-fantasy-filter header — the catalog only
+        confirms that header scopes box_scores()'s mMatchup+mScoreboard
+        view, not this tool's lighter mMatchupScore view)."""
         monkeypatch.setenv("ESPN_S2", "some-cookie")
         monkeypatch.setenv("ESPN_SWID", "some-swid")
 
@@ -324,10 +328,7 @@ class TestGetEspnScoreboard:
         assert result["scoreboard"] == [schedule[1]]
 
         call_args = mock_client.get.call_args
-        import json as _json
-        assert _json.loads(call_args.kwargs["headers"]["x-fantasy-filter"]) == {
-            "schedule": {"filterMatchupPeriodIds": {"value": [3]}}
-        }
+        assert "x-fantasy-filter" not in call_args.kwargs["headers"]
 
     @pytest.mark.asyncio
     async def test_non_auth_http_error_falls_through_to_handle_http_errors(self, monkeypatch):
