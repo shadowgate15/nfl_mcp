@@ -13,6 +13,9 @@ jobs:
   contracts:
     name: Data-source contract checks
     runs-on: ubuntu-latest
+    env:
+      ESPN_S2: ${{ secrets.ESPN_S2 }}
+      ESPN_SWID: ${{ secrets.ESPN_SWID }}
     steps:
       - uses: actions/checkout@v7
 

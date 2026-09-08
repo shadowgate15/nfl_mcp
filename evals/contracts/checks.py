@@ -165,6 +165,50 @@ def _espn_news() -> str:
 
 
 # ---------------------------------------------------------------------------
+# ESPN Fantasy — the maintainer's own real private league, authenticated via
+# ESPN_S2/ESPN_SWID repo secrets. Critical (unlike the public espn.* checks
+# above): a red build here means either ESPN's API shape broke or the
+# maintainer's cookies expired, and the two need different responses (ADR
+# 0001, ADR 0003).
+# ---------------------------------------------------------------------------
+# Not a secret — a league ID is just a routing target, matching how every
+# other check above hardcodes its own target. Maintainer: replace with your
+# real private league ID.
+_ESPN_FANTASY_LEAGUE_ID = "REPLACE_WITH_MAINTAINER_ESPN_LEAGUE_ID"
+
+
+@check("espn_fantasy.league", critical=True)
+def _espn_fantasy_league() -> str:
+    from nfl_mcp.errors import ErrorType
+    from nfl_mcp.espn_fantasy_tools import get_espn_league
+
+    # get_espn_league stacks @handle_espn_auth_errors under @handle_http_errors,
+    # so an ESPN httpx.HTTPStatusError never reaches this check as an exception
+    # — it's already been run through espn_errors.classify_espn_auth_error and
+    # turned into this dict's error/error_type (ADR 0003's "same detector,
+    # not a second one"). Surface that classified message as-is rather than
+    # re-deriving it.
+    result = asyncio.run(get_espn_league(_ESPN_FANTASY_LEAGUE_ID))
+
+    if not result.get("success"):
+        error_type = result.get("error_type")
+        if error_type in (ErrorType.ESPN_EXPIRED_COOKIES, ErrorType.ESPN_POSSIBLE_AUTH_ISSUE):
+            raise AssertionError(result.get("error"))
+        raise AssertionError(f"get_espn_league failed ({error_type}): {result.get('error')}")
+
+    league = result.get("league") or {}
+    settings = league.get("settings") or {}
+    assert league.get("id") is not None, "league.id missing"
+    assert settings.get("name"), "league.settings.name missing"
+    assert settings.get("size"), "league.settings.size missing"
+    assert settings.get("rosterSettings", {}).get("lineupSlotCounts"), \
+        "league.settings.rosterSettings.lineupSlotCounts missing"
+    assert settings.get("scoringSettings", {}).get("scoringItems"), \
+        "league.settings.scoringSettings.scoringItems missing"
+    return f"league id={league.get('id')} name={settings.get('name')!r} size={settings.get('size')}"
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 def run_all() -> list[dict]:
