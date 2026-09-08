@@ -83,6 +83,7 @@ def get_all_tools() -> list[Callable]:
 
         # ESPN Fantasy Tools
         get_espn_league,
+        get_espn_draft,
         get_espn_player_news,
 
         # Web Tools
@@ -421,6 +422,23 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         return await espn_fantasy_tools.get_espn_league(league_id, year)
     except ValueError as e:
         return {"league": None, "success": False, "error": f"Invalid league_id: {e!s}"}
+
+
+@timing_decorator("get_espn_draft", tool_type="espn_fantasy")
+async def get_espn_draft(league_id: str, year: int | None = None) -> dict:
+    """Get an ESPN fantasy league's draft results.
+
+    Parameters:
+        league_id (str, required): The ESPN league ID.
+        year (int, optional): Season year; defaults to the current year.
+    Returns: {draft, success, error?, error_type?}
+    Example: get_espn_draft(league_id="1234", year=2018)
+    """
+    try:
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
+        return await espn_fantasy_tools.get_espn_draft(league_id, year)
+    except ValueError as e:
+        return {"draft": None, "success": False, "error": f"Invalid league_id: {e!s}"}
 
 
 @timing_decorator("get_espn_player_news", tool_type="espn_fantasy")

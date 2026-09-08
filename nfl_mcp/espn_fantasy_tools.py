@@ -203,6 +203,45 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
 
 
 @handle_http_errors(
+    default_data={"draft": None},
+    operation_name="fetching ESPN draft results",
+)
+@handle_espn_auth_errors
+async def get_espn_draft(league_id: str, year: int | None = None) -> dict:
+    """
+    Get an ESPN fantasy league's draft results.
+
+    Requests only the `mDraftDetail` view. Transparently spans the 2018
+    leagueHistory boundary; callers never need to know which URL format or
+    envelope shape ESPN actually used underneath. Undrafted leagues are not
+    an error: `draft.draftDetail.drafted` is simply false and `picks` empty
+    (docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §5).
+
+    Args:
+        league_id: The ESPN league ID.
+        year: Season year; defaults to the current year if omitted.
+
+    Returns:
+        A dictionary containing:
+        - draft: Draft results as ESPN returns them
+        - success: Whether the request was successful
+        - error: Error message (if any)
+        - error_type: Type of error (if any)
+    """
+    resolved_year = year if year is not None else datetime.now().year
+
+    async with create_http_client() as client:
+        draft_data = await _fetch_espn_league_view(
+            client,
+            league_id=league_id,
+            year=resolved_year,
+            views=["mDraftDetail"],
+        )
+
+    return create_success_response({"draft": draft_data})
+
+
+@handle_http_errors(
     default_data={"news": [], "total_news": 0},
     operation_name="fetching ESPN player news",
 )
