@@ -439,6 +439,18 @@ def _validate_espn_list_pagination(limit: int | None, offset: int | None) -> tup
     )
 
 
+_ESPN_DETAIL_LEVELS = frozenset({"summary", "full"})
+
+
+def _validate_espn_detail(detail: str | None) -> str:
+    """Shared `detail` validation for get_espn_rosters/get_espn_matchups (ADR 0006)."""
+    if detail is None:
+        return "summary"
+    if detail not in _ESPN_DETAIL_LEVELS:
+        raise ValueError(f"detail must be one of {sorted(_ESPN_DETAIL_LEVELS)}, got {detail!r}")
+    return detail
+
+
 @timing_decorator("get_espn_players", tool_type="espn_fantasy")
 async def get_espn_players(
     year: int | None = None, limit: int | None = None, offset: int | None = None
@@ -492,7 +504,7 @@ async def get_espn_free_agents(
 
 @timing_decorator("get_espn_rosters", tool_type="espn_fantasy")
 async def get_espn_rosters(
-    league_id: str, week: int | None = None, year: int | None = None
+    league_id: str, week: int | None = None, year: int | None = None, detail: str | None = None
 ) -> dict:
     """Get every team's roster for an ESPN fantasy league.
 
@@ -500,8 +512,10 @@ async def get_espn_rosters(
         league_id (str, required): The ESPN league ID.
         week (int, optional): Week to scope the roster to; defaults to the current roster.
         year (int, optional): Season year; defaults to the current year.
+        detail (str, default "summary"): "summary" trims each roster entry to a field
+            allowlist (drops per-player nested stats); "full" returns entries unfiltered.
     Returns: {rosters: [...], success, error?, error_type?}
-    Example: get_espn_rosters(league_id="1234", week=5, year=2023)
+    Example: get_espn_rosters(league_id="1234", week=5, year=2023, detail="summary")
     """
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
@@ -509,7 +523,8 @@ async def get_espn_rosters(
             week = validate_numeric_input(
                 week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
             )
-        return await espn_fantasy_tools.get_espn_rosters(league_id, week, year)
+        detail = _validate_espn_detail(detail)
+        return await espn_fantasy_tools.get_espn_rosters(league_id, week, year, detail)
     except ValueError as e:
         return {"rosters": [], "success": False, "error": f"Invalid input: {e!s}"}
 
@@ -537,9 +552,10 @@ async def get_espn_scoreboard(league_id: str, week: int | None = None, year: int
 
     Parameters:
         league_id (str, required): The ESPN league ID.
-        week (int, optional): Matchup period (week) to filter to; omits for the full season's schedule.
+        week (int, optional): Matchup period (week) to filter to; omit for a capped
+            window of the season's schedule (most recent weeks; see total_weeks/has_more).
         year (int, optional): Season year; defaults to the current year.
-    Returns: {scoreboard: [...], success, error?, error_type?}
+    Returns: {scoreboard: [...], total_weeks, has_more, success, error?, error_type?}
     Example: get_espn_scoreboard(league_id="1234", week=3, year=2018)
     """
     try:
@@ -554,15 +570,21 @@ async def get_espn_scoreboard(league_id: str, week: int | None = None, year: int
 
 
 @timing_decorator("get_espn_matchups", tool_type="espn_fantasy")
-async def get_espn_matchups(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+async def get_espn_matchups(
+    league_id: str, week: int | None = None, year: int | None = None, detail: str | None = None
+) -> dict:
     """Get full box-score/lineup detail for an ESPN fantasy league's matchups.
 
     Parameters:
         league_id (str, required): The ESPN league ID.
-        week (int, optional): Matchup period (week) to filter to; omits for the full season's schedule.
+        week (int, optional): Matchup period (week) to filter to; omit for a capped
+            window of the season's schedule (most recent weeks; see total_weeks/has_more).
         year (int, optional): Season year; defaults to the current year.
-    Returns: {matchups: [...], success, error?, error_type?}
-    Example: get_espn_matchups(league_id="1234", week=3, year=2018)
+        detail (str, default "summary"): "summary" trims each side's box-score roster
+            entries to a field allowlist (drops per-player nested stats); "full" returns
+            entries unfiltered.
+    Returns: {matchups: [...], total_weeks, has_more, success, error?, error_type?}
+    Example: get_espn_matchups(league_id="1234", week=3, year=2018, detail="summary")
     """
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
@@ -570,7 +592,8 @@ async def get_espn_matchups(league_id: str, week: int | None = None, year: int |
             week = validate_numeric_input(
                 week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
             )
-        return await espn_fantasy_tools.get_espn_matchups(league_id, week, year)
+        detail = _validate_espn_detail(detail)
+        return await espn_fantasy_tools.get_espn_matchups(league_id, week, year, detail)
     except ValueError as e:
         return {"matchups": [], "success": False, "error": f"Invalid input: {e!s}"}
 
