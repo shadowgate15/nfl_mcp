@@ -12,11 +12,15 @@ existing table to join against, so it gets a small static map, same pattern as
 `coaching_tools.py`'s `TEAM_ID_MAP`. The `PREFETCH_ATHLETES`/interval refresh mechanism carries
 over unchanged — nothing suggests ESPN's pool is more volatile or rate-limited than Sleeper's.
 
-Every other `player_id`-keyed table in `database.py` was checked: `player_week_stats`,
-`player_usage_stats`, and `player_practice_status` have no current callers (dead/future-use, no
-migration needed); `player_injuries`/`injury_history` are populated today by `injury_service.py`
-but already key on ESPN's own athlete id (extracted from ESPN's `/athletes/{id}` injury-detail
-URL), not Sleeper's — that system already anticipated this cutover.
+Every other `player_id`-keyed table in `database.py` was checked: `player_practice_status` has no
+current callers (dead/future-use, no migration needed); `player_injuries`/`injury_history` are
+populated today by `injury_service.py` but already key on ESPN's own athlete id (extracted from
+ESPN's `/athletes/{id}` injury-detail URL), not Sleeper's — that system already anticipated this
+cutover. **Correction (surfaced by issue #31):** `player_week_stats` and `player_usage_stats` are
+*not* dead — `server.py`'s prefetch loop actively writes both, and
+`sleeper_enrichment._enrich_usage_and_opponent` actively reads them across four call sites in
+`sleeper_tools.py`/`sleeper_transactions.py`. Both need re-keying from Sleeper to ESPN player ids
+like every other table in this cache, not a no-op.
 
 `player_values.py` (FantasyCalc integration, feeding `draft_tools.py`, `faab_tools.py`,
 `trade_analyzer_tools.py`) is the one real dependency: it documents Sleeper id as its *primary*
