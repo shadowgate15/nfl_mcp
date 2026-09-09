@@ -26,7 +26,7 @@ import os
 from collections.abc import Callable
 from datetime import datetime
 from functools import wraps
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -201,6 +201,52 @@ def _filter_schedule_to_week(schedule: list[dict[str, Any]], week: int) -> list[
     return [matchup for matchup in schedule if matchup.get("matchupPeriodId") == week]
 
 
+# ADR 0006's 150 KB hard response-size cap, applied per tool response.
+_RESPONSE_SIZE_HARD_CAP_BYTES = 150 * 1024
+
+
+class PaginatedPage(NamedTuple):
+    """A sliced-and-size-capped page, as returned by `_paginate_bounded`."""
+    items: list[dict[str, Any]]
+    total: int
+    has_more: bool
+
+
+def _paginate_bounded(items: list[dict[str, Any]], limit: int, offset: int) -> PaginatedPage:
+    """
+    Slice ``items[offset:offset+limit]`` for get_espn_players/get_espn_free_agents
+    pagination (ADR 0006), then shrink the page further if its JSON-serialized size
+    would still exceed the 150 KB hard cap. This guarantees the byte budget holds
+    regardless of how heavy an individual ESPN player/free-agent object turns out to
+    be, rather than depending on a precomputed "safe" limit ceiling tuned to an
+    unconfirmed per-item byte estimate (no live ESPN access was available when this
+    budget was designed; see docs/ESPN_FANTASY_RESPONSE_SIZE_RESEARCH.md).
+
+    Returns:
+        A PaginatedPage(items, total, has_more) where `total` is the pre-slice item
+        count and `has_more` is True whenever items remain past this page, whether
+        because the caller's limit/offset didn't reach the end or because
+        size-capping trimmed items the caller otherwise asked for.
+    """
+    total = len(items)
+    page = items[offset:offset + limit]
+
+    if page and len(json.dumps(page, default=str)) > _RESPONSE_SIZE_HARD_CAP_BYTES:
+        # Binary search the largest prefix of `page` that fits the cap, rather
+        # than re-serializing the whole (shrinking) page once per popped item.
+        lo, hi = 0, len(page)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if len(json.dumps(page[:mid], default=str)) <= _RESPONSE_SIZE_HARD_CAP_BYTES:
+                lo = mid
+            else:
+                hi = mid - 1
+        page = page[:lo]
+
+    has_more = offset + len(page) < total
+    return PaginatedPage(page, total, has_more)
+
+
 @handle_http_errors(
     default_data={"league": None},
     operation_name="fetching ESPN league settings",
@@ -250,9 +296,9 @@ _ACTIVE_PLAYERS_FILTER_HEADER = json.dumps({"filterActive": {"value": True}})
     default_data={"players": []},
     operation_name="fetching ESPN pro player pool",
 )
-async def get_espn_players(year: int | None = None) -> dict:
+async def get_espn_players(year: int | None = None, limit: int = 25, offset: int = 0) -> dict:
     """
-    Get the full ESPN pro-player pool for a season, unscoped to any league.
+    Get a page of the ESPN pro-player pool for a season, unscoped to any league.
 
     Hits the separate `/players` endpoint (catalog §7b) — not the
     league-scoped `kona_player_info` view `get_espn_free_agents` uses — so it
@@ -262,12 +308,22 @@ async def get_espn_players(year: int | None = None) -> dict:
     players view, which wraps in `{"players": [...]}`); this tool normalizes
     both shapes to the same `{"players": [...]}` output (ADR 0003).
 
+    The full ~1,700-player pool is always fetched (this endpoint has no
+    server-side limit/offset of its own), but only `items[offset:offset+limit]`
+    is returned, extending the limit-and-slice idiom `get_trending_players`/
+    `get_league_leaders`/`get_espn_player_news` already use rather than
+    inventing a new pagination mechanism (ADR 0006).
+
     Args:
         year: Season year; defaults to the current year if omitted.
+        limit: Max players to return in this page (defaults to 25).
+        offset: Players to skip before this page (defaults to 0).
 
     Returns:
         A dictionary containing:
-        - players: The full pro-player pool as ESPN returns them
+        - players: This page of the pro-player pool
+        - total_players: Total players in the full pool (before slicing)
+        - has_more: Whether players remain beyond this page
         - success: Whether the request was successful
         - error: Error message (if any)
         - error_type: Type of error (if any)
@@ -283,8 +339,13 @@ async def get_espn_players(year: int | None = None) -> dict:
         data = response.json()
 
     players = data if isinstance(data, list) else data.get("players", [])
+    page, total_players, has_more = _paginate_bounded(players, limit, offset)
 
-    return create_success_response({"players": players})
+    return create_success_response({
+        "players": page,
+        "total_players": total_players,
+        "has_more": has_more,
+    })
 
 
 # Restricts the league-scoped `kona_player_info` view to free-agent/waiver
@@ -299,9 +360,15 @@ _FREE_AGENT_FILTER_HEADER = json.dumps({"players": {"filterStatus": {"value": ["
     operation_name="fetching ESPN league free agents",
 )
 @handle_espn_auth_errors
-async def get_espn_free_agents(league_id: str, week: int | None = None, year: int | None = None) -> dict:
+async def get_espn_free_agents(
+    league_id: str,
+    week: int | None = None,
+    year: int | None = None,
+    limit: int = 25,
+    offset: int = 0,
+) -> dict:
     """
-    Get free-agent and waiver-available players for an ESPN fantasy league.
+    Get a page of free-agent and waiver-available players for an ESPN fantasy league.
 
     Requests the `kona_player_info` view (catalog §7a), restricted
     server-side to FREEAGENT/WAIVERS status via an `x-fantasy-filter`
@@ -309,16 +376,26 @@ async def get_espn_free_agents(league_id: str, week: int | None = None, year: in
     transparently spans the 2018 leagueHistory boundary the same way
     `get_espn_league` does.
 
+    This tool previously fetched and returned every matching free
+    agent/waiver player unbounded (~2-3 MB worst case). It now gains the
+    `limit`/`offset` pagination `get_espn_players` already has, applying the
+    same slice-and-cap idiom (ADR 0006): `items[offset:offset+limit]`,
+    further trimmed if needed to stay under the 150 KB hard response-size cap.
+
     Args:
         league_id: The ESPN league ID.
         week: Scoring period (week) to scope free agency to. Omitted
             entirely from the request when None, letting ESPN apply its own
             current-period default.
         year: Season year; defaults to the current year if omitted.
+        limit: Max free agents to return in this page (defaults to 25).
+        offset: Free agents to skip before this page (defaults to 0).
 
     Returns:
         A dictionary containing:
-        - players: Free-agent/waiver player entries as ESPN returns them
+        - players: This page of free-agent/waiver player entries
+        - total_free_agents: Total matching players (before slicing)
+        - has_more: Whether players remain beyond this page
         - success: Whether the request was successful
         - error: Error message (if any)
         - error_type: Type of error (if any)
@@ -339,7 +416,14 @@ async def get_espn_free_agents(league_id: str, week: int | None = None, year: in
             extra_headers={"x-fantasy-filter": _FREE_AGENT_FILTER_HEADER},
         )
 
-    return create_success_response({"players": data.get("players", [])})
+    players = data.get("players", [])
+    page, total_free_agents, has_more = _paginate_bounded(players, limit, offset)
+
+    return create_success_response({
+        "players": page,
+        "total_free_agents": total_free_agents,
+        "has_more": has_more,
+    })
 
 
 @handle_http_errors(

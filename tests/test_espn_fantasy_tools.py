@@ -21,12 +21,16 @@ Covers get_espn_players (no cookies, `/players` endpoint, catalog §7b):
   normalize to the same output shape
 - no ESPN_S2/ESPN_SWID needed
 - HTTP error path
+- limit/offset pagination: default-limit slicing, explicit limit/offset,
+  has_more boundary correctness, and the 150 KB hard size cap (ADR 0006)
 
 Covers get_espn_free_agents (cookie-gated, `kona_player_info` view, catalog
 §7a):
 - success path, including the x-fantasy-filter header and scoringPeriodId
 - missing-credentials short-circuit
 - HTTP error path
+- limit/offset pagination: default-limit slicing, explicit limit/offset,
+  has_more boundary correctness, and the 150 KB hard size cap (ADR 0006)
 
 Covers get_espn_rosters:
 - success path on the 2018+ object-wrapped envelope, with a week passed
@@ -415,6 +419,104 @@ class TestGetEspnPlayers:
         tool_names = [t.__name__ for t in get_all_tools()]
         assert "get_espn_players" in tool_names
 
+    @pytest.mark.asyncio
+    async def test_default_limit_pages_the_pool(self, monkeypatch):
+        """With no limit/offset given, only the first 25 players are returned."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": i, "fullName": f"Player {i}"} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players()
+
+        assert result["success"] is True
+        assert len(result["players"]) == 25
+        assert result["players"] == raw_players[:25]
+        assert result["total_players"] == 40
+        assert result["has_more"] is True
+
+    @pytest.mark.asyncio
+    async def test_explicit_limit_and_offset(self, monkeypatch):
+        """An explicit limit/offset selects the corresponding slice."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": i, "fullName": f"Player {i}"} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players(limit=10, offset=30)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players[30:40]
+        assert result["total_players"] == 40
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_has_more_false_at_exact_boundary(self, monkeypatch):
+        """offset+limit landing exactly on the total leaves has_more False."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": i} for i in range(10)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players(limit=5, offset=5)
+
+        assert result["players"] == raw_players[5:10]
+        assert result["has_more"] is False
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players(limit=5, offset=4)
+
+        assert result["players"] == raw_players[4:9]
+        assert result["has_more"] is True
+
+    @pytest.mark.asyncio
+    async def test_response_stays_within_hard_size_cap(self, monkeypatch):
+        """Even a large max-limit page is trimmed to stay under the 150 KB hard cap."""
+        import json
+
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        # Each entry is padded to be much heavier than a realistic bio-only
+        # /players entry, to stress the size-based trimming safety net
+        # independent of any particular byte-per-player estimate.
+        raw_players = [
+            {"id": i, "fullName": f"Player {i}", "blob": "x" * 5000}
+            for i in range(200)
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players(limit=100, offset=0)
+
+        assert result["success"] is True
+        assert len(json.dumps(result["players"])) <= 150 * 1024
+        assert result["total_players"] == 200
+        assert result["has_more"] is True
+        assert len(result["players"]) < 100
+
 
 class TestGetEspnFreeAgents:
     """Test get_espn_free_agents, the cookie-gated league-scoped free-agent tool."""
@@ -530,6 +632,103 @@ class TestGetEspnFreeAgents:
 
         tool_names = [t.__name__ for t in get_all_tools()]
         assert "get_espn_free_agents" in tool_names
+
+    @pytest.mark.asyncio
+    async def test_default_limit_pages_the_free_agent_list(self, monkeypatch):
+        """With no limit/offset given, only the first 25 free agents are returned."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        raw_players = [{"id": i, "player": {"fullName": f"FA {i}"}} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players[:25]
+        assert result["total_free_agents"] == 40
+        assert result["has_more"] is True
+
+    @pytest.mark.asyncio
+    async def test_explicit_limit_and_offset(self, monkeypatch):
+        """An explicit limit/offset selects the corresponding slice."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        raw_players = [{"id": i, "player": {"fullName": f"FA {i}"}} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023, limit=10, offset=30)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players[30:40]
+        assert result["total_free_agents"] == 40
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_has_more_false_at_exact_boundary(self, monkeypatch):
+        """offset+limit landing exactly on the total leaves has_more False."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        raw_players = [{"id": i} for i in range(10)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023, limit=5, offset=5)
+
+        assert result["players"] == raw_players[5:10]
+        assert result["has_more"] is False
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023, limit=5, offset=4)
+
+        assert result["players"] == raw_players[4:9]
+        assert result["has_more"] is True
+
+    @pytest.mark.asyncio
+    async def test_response_stays_within_hard_size_cap(self, monkeypatch):
+        """Even a large max-limit page is trimmed to stay under the 150 KB hard cap."""
+        import json
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        # Free-agent entries carry a full nested Player (incl. stats[]),
+        # heavier than a bio-only /players entry (ADR 0006) - padded here to
+        # stress the size-based trimming safety net directly.
+        raw_players = [
+            {"id": i, "player": {"fullName": f"FA {i}"}, "blob": "x" * 5000}
+            for i in range(200)
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023, limit=100, offset=0)
+
+        assert result["success"] is True
+        assert len(json.dumps(result["players"])) <= 150 * 1024
+        assert result["total_free_agents"] == 200
+        assert result["has_more"] is True
+        assert len(result["players"]) < 100
 
 
 class TestGetEspnRosters:
@@ -1465,6 +1664,81 @@ class TestGetEspnPlayerNews:
         assert result["success"] is True
         assert result["total_news"] == 1
         assert client.get.call_count == 2
+
+
+class TestEspnPlayersFreeAgentsRegistryValidation:
+    """Test the tool_registry.py wrappers' limit/offset validation for both tools."""
+
+    @pytest.mark.asyncio
+    async def test_get_espn_players_out_of_range_limit_snaps_to_default(self, monkeypatch):
+        """A limit outside 1-100 snaps to the default of 25 (validate_limit's semantics)."""
+        from nfl_mcp.tool_registry import get_espn_players as registry_get_espn_players
+
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": i} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await registry_get_espn_players(limit=1000)
+
+        assert result["success"] is True
+        assert len(result["players"]) == 25
+
+    @pytest.mark.asyncio
+    async def test_get_espn_players_negative_offset_clamps_to_zero(self, monkeypatch):
+        """A negative offset clamps to 0 rather than erroring."""
+        from nfl_mcp.tool_registry import get_espn_players as registry_get_espn_players
+
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": i} for i in range(5)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await registry_get_espn_players(limit=5, offset=-10)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players[:5]
+
+    @pytest.mark.asyncio
+    async def test_get_espn_free_agents_out_of_range_limit_snaps_to_default(self, monkeypatch):
+        """A limit outside 1-100 snaps to the default of 25 (validate_limit's semantics)."""
+        from nfl_mcp.tool_registry import get_espn_free_agents as registry_get_espn_free_agents
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        raw_players = [{"id": i} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await registry_get_espn_free_agents("1234", limit=0)
+
+        assert result["success"] is True
+        assert len(result["players"]) == 25
+
+    @pytest.mark.asyncio
+    async def test_get_espn_free_agents_invalid_league_id_returns_error(self):
+        """An invalid league_id short-circuits with a validation error, no HTTP call made."""
+        from nfl_mcp.tool_registry import get_espn_free_agents as registry_get_espn_free_agents
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client") as mock_create_client:
+            result = await registry_get_espn_free_agents("x" * 100)
+
+        mock_create_client.assert_not_called()
+        assert result["success"] is False
 
 
 class TestEspnFantasyToolRegistryIntegration:

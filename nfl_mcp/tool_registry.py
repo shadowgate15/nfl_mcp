@@ -431,28 +431,52 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
         return {"league": None, "success": False, "error": f"Invalid league_id: {e!s}"}
 
 
+def _validate_espn_list_pagination(limit: int | None, offset: int | None) -> tuple[int, int]:
+    """Shared limit/offset validation for get_espn_players/get_espn_free_agents (ADR 0006)."""
+    return (
+        validate_limit(limit, 1, 100, 25),
+        validate_numeric_input(offset, min_val=0, default=0, required=False),
+    )
+
+
 @timing_decorator("get_espn_players", tool_type="espn_fantasy")
-async def get_espn_players(year: int | None = None) -> dict:
-    """Get the full ESPN pro-player pool for a season, unscoped to any league.
+async def get_espn_players(
+    year: int | None = None, limit: int | None = None, offset: int | None = None
+) -> dict:
+    """Get a page of the ESPN pro-player pool for a season, unscoped to any league.
 
     Parameters:
         year (int, optional): Season year; defaults to the current year.
-    Returns: {players: [...], success, error?, error_type?}
-    Example: get_espn_players(year=2024)
+        limit (int, default 25, range 1-100): Max players to return in this page.
+        offset (int, default 0): Players to skip before this page.
+    Returns: {players: [...], total_players, has_more, success, error?, error_type?}
+    Example: get_espn_players(year=2024, limit=25, offset=0)
     """
-    return await espn_fantasy_tools.get_espn_players(year)
+    try:
+        limit, offset = _validate_espn_list_pagination(limit, offset)
+        return await espn_fantasy_tools.get_espn_players(year, limit, offset)
+    except ValueError as e:
+        return {"players": [], "success": False, "error": f"Invalid input: {e!s}"}
 
 
 @timing_decorator("get_espn_free_agents", tool_type="espn_fantasy")
-async def get_espn_free_agents(league_id: str, week: int | None = None, year: int | None = None) -> dict:
-    """Get free-agent and waiver-available players for an ESPN fantasy league.
+async def get_espn_free_agents(
+    league_id: str,
+    week: int | None = None,
+    year: int | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+) -> dict:
+    """Get a page of free-agent and waiver-available players for an ESPN fantasy league.
 
     Parameters:
         league_id (str, required): The ESPN league ID.
         week (int, optional): Scoring period (week) to scope free agency to.
         year (int, optional): Season year; defaults to the current year.
-    Returns: {players: [...], success, error?, error_type?}
-    Example: get_espn_free_agents(league_id="1234", week=3, year=2023)
+        limit (int, default 25, range 1-100): Max free agents to return in this page.
+        offset (int, default 0): Free agents to skip before this page.
+    Returns: {players: [...], total_free_agents, has_more, success, error?, error_type?}
+    Example: get_espn_free_agents(league_id="1234", week=3, year=2023, limit=25, offset=0)
     """
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
@@ -460,7 +484,8 @@ async def get_espn_free_agents(league_id: str, week: int | None = None, year: in
             week = validate_numeric_input(
                 week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False
             )
-        return await espn_fantasy_tools.get_espn_free_agents(league_id, week, year)
+        limit, offset = _validate_espn_list_pagination(limit, offset)
+        return await espn_fantasy_tools.get_espn_free_agents(league_id, week, year, limit, offset)
     except ValueError as e:
         return {"players": [], "success": False, "error": f"Invalid input: {e!s}"}
 
