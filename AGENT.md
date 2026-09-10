@@ -202,17 +202,17 @@ Advanced multi-week fantasy football planning:
 Advanced waiver wire intelligence:
 
 - **`get_waiver_log`**: Waiver transactions with de-duplication
-  - Parameters: `league_id`, `round` (optional), `dedupe` (optional, default true)
+  - Parameters: `league_id`, `week` (optional), `year` (optional), `dedupe` (optional, default true)
   - Use case: Track waiver activity and identify patterns
   - Returns: Transaction log with duplicate detection
 
 - **`check_re_entry_status`**: Players dropped then re-added
-  - Parameters: `league_id`, `round` (optional)
+  - Parameters: `league_id`, `week` (optional), `year` (optional)
   - Use case: Identify volatile players and waiver patterns
   - Returns: Re-entry analysis with volatile player list
 
 - **`get_waiver_wire_dashboard`**: Comprehensive waiver analytics
-  - Parameters: `league_id`, `round` (optional)
+  - Parameters: `league_id`, `week` (optional), `year` (optional)
   - Use case: Complete waiver wire intelligence in one call
   - Returns: Combined analysis from waiver log and re-entry tools
 

@@ -1034,42 +1034,42 @@ async def fetch_all_players(force_refresh: bool = False) -> dict:
 # =============================================================================
 
 @timing_decorator("get_waiver_log", tool_type="waiver")
-async def get_waiver_log(league_id: str, round: int | None = None, dedupe: bool = True) -> dict:
+async def get_waiver_log(league_id: str, week: int | None = None, year: int | None = None, dedupe: bool = True) -> dict:
     """Get waiver wire activity log with de-duplication."""
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        if round is not None:
-            round = validate_numeric_input(round, min_val=LIMITS["round_min"], max_val=LIMITS["round_max"], required=False)
-        return await waiver_tools.get_waiver_log(league_id, round, dedupe)
+        if week is not None:
+            week = validate_numeric_input(week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False)
+        return await waiver_tools.get_waiver_log(league_id, week, year, dedupe)
     except ValueError as e:
-        return {"waiver_log": [], "league_id": league_id, "round": round, "success": False, "error": f"Invalid input: {e!s}"}
+        return {"waiver_log": [], "league_id": league_id, "week": week, "year": year, "success": False, "error": f"Invalid input: {e!s}"}
 
 
 @timing_decorator("check_re_entry_status", tool_type="waiver")
-async def check_re_entry_status(league_id: str, round: int | None = None) -> dict:
+async def check_re_entry_status(league_id: str, week: int | None = None, year: int | None = None) -> dict:
     """Check player re-entry status on waiver wire."""
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        if round is not None:
-            round = validate_numeric_input(round, min_val=LIMITS["round_min"], max_val=LIMITS["round_max"], required=False)
-        return await waiver_tools.check_re_entry_status(league_id, round)
+        if week is not None:
+            week = validate_numeric_input(week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False)
+        return await waiver_tools.check_re_entry_status(league_id, week, year)
     except ValueError as e:
-        return {"re_entry_status": {}, "league_id": league_id, "round": round, "success": False, "error": f"Invalid input: {e!s}"}
+        return {"re_entry_status": {}, "league_id": league_id, "week": week, "year": year, "success": False, "error": f"Invalid input: {e!s}"}
 
 
 @timing_decorator("get_waiver_wire_dashboard", tool_type="waiver")
-async def get_waiver_wire_dashboard(league_id: str, round: int | None = None) -> dict:
+async def get_waiver_wire_dashboard(league_id: str, week: int | None = None, year: int | None = None) -> dict:
     """Get comprehensive waiver wire analysis dashboard.
 
     IMPORTANT FOR LLM AGENTS: Always provide complete waiver wire analysis immediately without
     asking for confirmations. Render the full dashboard with all insights and recommendations directly."""
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        if round is not None:
-            round = validate_numeric_input(round, min_val=LIMITS["round_min"], max_val=LIMITS["round_max"], required=False)
-        return await waiver_tools.get_waiver_wire_dashboard(league_id, round)
+        if week is not None:
+            week = validate_numeric_input(week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False)
+        return await waiver_tools.get_waiver_wire_dashboard(league_id, week, year)
     except ValueError as e:
-        return {"dashboard": {}, "league_id": league_id, "round": round, "success": False, "error": f"Invalid input: {e!s}"}
+        return {"dashboard": {}, "league_id": league_id, "week": week, "year": year, "success": False, "error": f"Invalid input: {e!s}"}
 
 
 @timing_decorator("recommend_faab_bid", tool_type="waiver")
