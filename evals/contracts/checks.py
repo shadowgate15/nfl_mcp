@@ -59,7 +59,7 @@ def _fantasycalc() -> str:
     assert isinstance(data, list) and len(data) > 100, f"expected a big list, got {type(data)} len={len(data) if hasattr(data,'__len__') else '?'}"
     first = data[0]
     player = first.get("player") or {}
-    assert player.get("sleeperId"), "player.sleeperId missing (breaks Sleeper mapping)"
+    assert player.get("espnId"), "player.espnId missing (breaks ESPN mapping)"
     assert player.get("position"), "player.position missing"
     assert first.get("value") is not None, "value missing"
     assert first.get("positionRank") is not None, "positionRank missing"
@@ -69,7 +69,7 @@ def _fantasycalc() -> str:
     res = asyncio.run(svc.get_values(1.0, 1, 12, False))
     assert res.get("source") == "fantasycalc" and res.get("count", 0) > 100, \
         f"value service returned source={res.get('source')} count={res.get('count')}"
-    return f"{len(data)} values; top={player.get('name')} (sleeperId ok)"
+    return f"{len(data)} values; top={player.get('name')} (espnId ok)"
 
 
 # ---------------------------------------------------------------------------
@@ -106,46 +106,22 @@ def _nflverse_columns() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Sleeper — powers league/roster/matchups + usage & snap enrichment
+# ESPN — powers news/teams/injuries/standings/schedules/coaching (warn-level,
+# except espn.state below: the hard cutover off Sleeper (ADR 0008) leaves no
+# fallback state source, so that one check is critical)
 # ---------------------------------------------------------------------------
-@check("sleeper.state", critical=True)
-def _sleeper_state() -> str:
-    d = _get("https://api.sleeper.app/v1/state/nfl").json()
-    for k in ("week", "season", "season_type"):
-        assert k in d, f"state missing '{k}'"
-    return f"week={d['week']} season={d['season']} ({d['season_type']})"
+@check("espn.state", critical=True)
+def _espn_state() -> str:
+    """ESPN-core's parameterless scoreboard endpoint: no league/auth needed."""
+    d = _get("https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard").json()
+    week = d.get("week") or {}
+    season = d.get("season") or {}
+    assert week.get("number") is not None, "week.number missing"
+    assert season.get("type") is not None, "season.type missing"
+    assert season.get("year") is not None, "season.year missing"
+    return f"week={week.get('number')} season={season.get('year')} (type={season.get('type')})"
 
 
-@check("sleeper.week_stats", critical=True)
-def _sleeper_week_stats() -> str:
-    """Snap% + targets enrichment depends on off_snp / tm_off_snp / rec_tgt."""
-    for season in _completed_seasons():
-        try:
-            d = _get(f"https://api.sleeper.app/v1/stats/nfl/regular/{season}/1").json()
-        except Exception:
-            continue
-        if not (isinstance(d, dict) and len(d) > 100):
-            continue
-        have_snaps = sum(1 for s in d.values() if isinstance(s, dict) and "off_snp" in s and "tm_off_snp" in s)
-        have_tgt = sum(1 for s in d.values() if isinstance(s, dict) and "rec_tgt" in s)
-        assert have_snaps > 50, f"only {have_snaps} players with off_snp/tm_off_snp"
-        assert have_tgt > 50, f"only {have_tgt} players with rec_tgt"
-        return f"{season} wk1: {have_snaps} w/ snaps, {have_tgt} w/ targets"
-    raise AssertionError("no sleeper week stats for recent seasons")
-
-
-@check("sleeper.players", critical=False)
-def _sleeper_players() -> str:
-    d = _get("https://api.sleeper.app/v1/players/nfl").json()
-    assert isinstance(d, dict) and len(d) > 1000, "players map too small"
-    sample = next((v for v in d.values() if isinstance(v, dict) and v.get("position")), None)
-    assert sample and (sample.get("full_name") or sample.get("last_name")), "player entry shape changed"
-    return f"{len(d)} players; sample has position + name"
-
-
-# ---------------------------------------------------------------------------
-# ESPN — powers news/teams/injuries/standings/schedules/coaching (warn-level)
-# ---------------------------------------------------------------------------
 @check("espn.teams", critical=False)
 def _espn_teams() -> str:
     d = _get("https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams").json()
@@ -201,6 +177,33 @@ def _espn_fantasy_league() -> str:
     assert settings.get("scoringSettings", {}).get("scoringItems"), \
         "league.settings.scoringSettings.scoringItems missing"
     return f"league id={league.get('id')} name={settings.get('name')!r} size={settings.get('size')}"
+
+
+@check("espn_fantasy.players", critical=True)
+def _espn_fantasy_players() -> str:
+    """
+    Replaces sleeper.players (ADR 0008): under the hard cutover there's no
+    fallback identity source left if this silently breaks, so this is
+    critical where its Sleeper predecessor was not.
+
+    Only asserts the identity fields this catalog endpoint (`/players?view=
+    players_wl`, no auth) actually carries live: id, fullName,
+    defaultPositionId, proTeamId. injured/injuryStatus — present on
+    roster-scoped views (kona_player_info/mRoster, see
+    _summarize_roster_entry) — were live-probed absent from this endpoint's
+    2,627-player pool (0 of 2,627 carried either key), so they're not
+    asserted here.
+    """
+    from nfl_mcp.espn_fantasy_tools import get_espn_players
+
+    result = asyncio.run(get_espn_players(limit=50))
+    assert result.get("success"), f"get_espn_players failed: {result.get('error')}"
+    players = result.get("players") or []
+    assert players, "players list empty"
+    sample = players[0]
+    for field in ("id", "fullName", "defaultPositionId", "proTeamId"):
+        assert field in sample, f"player.{field} missing"
+    return f"{result.get('total_players')} players; sample={sample.get('fullName')!r}"
 
 
 # ---------------------------------------------------------------------------
