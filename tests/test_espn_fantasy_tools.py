@@ -940,6 +940,72 @@ class TestGetEspnRosters:
         assert result["success"] is False
         assert result["rosters"] == []
 
+    @pytest.mark.asyncio
+    async def test_total_teams_and_has_more_under_cap(self, monkeypatch):
+        """A response well under the hard cap reports total_teams and has_more=False."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        league_object = {
+            "teams": [
+                {"id": 1, "roster": {"entries": [self._roster_entry(101)]}},
+                {"id": 2, "roster": {"entries": [self._roster_entry(102)]}},
+            ],
+        }
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = league_object
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_rosters("1234", year=2018)
+
+        assert result["success"] is True
+        assert result["total_teams"] == 2
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_response_stays_within_hard_size_cap(self, monkeypatch):
+        """A large `detail="full"` roster response is trimmed to stay under the
+        150 KB hard cap (ADR 0006), with has_more surfacing the truncation."""
+        import json
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        def heavy_team(team_id):
+            entries = [
+                {
+                    "lineupSlotId": 2,
+                    "playerPoolEntry": {
+                        "player": {
+                            "id": team_id * 100 + i,
+                            "fullName": f"Player {team_id}-{i}",
+                            "blob": "x" * 2000,
+                        }
+                    },
+                }
+                for i in range(25)
+            ]
+            return {"id": team_id, "roster": {"entries": entries}}
+
+        league_object = {"teams": [heavy_team(t) for t in range(16)]}
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = league_object
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_rosters("1234", year=2018, detail="full")
+
+        assert result["success"] is True
+        assert len(json.dumps(result["rosters"])) <= 150 * 1024
+        assert result["total_teams"] == 16
+        assert result["has_more"] is True
+        assert len(result["rosters"]) < 16
+
 
 class TestGetEspnStandings:
     """Test get_espn_standings, including the sort/tiebreak derivation."""
@@ -1198,6 +1264,32 @@ class TestGetEspnScoreboard:
         assert result["total_weeks"] == 2
         assert result["has_more"] is False
 
+    @pytest.mark.asyncio
+    async def test_week_capping_boundary_exact_cap_returns_everything(self, monkeypatch):
+        """A season with exactly `_MAX_WEEKS_UNSCOPED` weeks is returned in
+        full — the boundary between "under cap" and "over cap"."""
+        from nfl_mcp.espn_fantasy_tools import _MAX_WEEKS_UNSCOPED
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [
+            {"id": w, "matchupPeriodId": w, "home": {"teamId": 1}, "away": {"teamId": 2}}
+            for w in range(1, _MAX_WEEKS_UNSCOPED + 1)
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": _MAX_WEEKS_UNSCOPED}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_scoreboard("1234", year=2018)
+
+        assert result["scoreboard"] == schedule
+        assert result["total_weeks"] == _MAX_WEEKS_UNSCOPED
+        assert result["has_more"] is False
+
 
 class TestGetEspnMatchups:
     """Test get_espn_matchups: full box-score/lineup detail (mMatchup+mScoreboard)."""
@@ -1352,6 +1444,51 @@ class TestGetEspnMatchups:
         assert result["has_more"] is True
         returned_weeks = sorted(m["matchupPeriodId"] for m in result["matchups"])
         assert returned_weeks == [4, 5, 6]
+
+    @pytest.mark.asyncio
+    async def test_week_capping_boundary_exact_cap_returns_everything(self, monkeypatch):
+        """A season with exactly `_MAX_WEEKS_UNSCOPED` weeks is returned in
+        full — the boundary between "under cap" and "over cap"."""
+        from nfl_mcp.espn_fantasy_tools import _MAX_WEEKS_UNSCOPED
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [self._matchup(w) for w in range(1, _MAX_WEEKS_UNSCOPED + 1)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": _MAX_WEEKS_UNSCOPED}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", year=2018, detail="full")
+
+        assert result["matchups"] == schedule
+        assert result["total_weeks"] == _MAX_WEEKS_UNSCOPED
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_week_given_total_weeks_reflects_server_scoped_fetch(self, monkeypatch):
+        """When `week` is given, ESPN's x-fantasy-filter already narrows the
+        fetch server-side, so total_weeks reflects just the requested period
+        (1), not a season-wide count — unlike get_espn_scoreboard, which
+        never sends that header."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [self._matchup(5, roster_size=1)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": 5}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", week=5, year=2018)
+
+        assert result["total_weeks"] == 1
+        assert result["has_more"] is False
 
     @pytest.mark.asyncio
     async def test_default_detail_trims_box_score_entries(self, monkeypatch):

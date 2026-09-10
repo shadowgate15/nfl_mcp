@@ -261,7 +261,12 @@ def _paginate_bounded(items: list[dict[str, Any]], limit: int, offset: int) -> P
 # the full season by default — the `weeks x teams` multiplier this avoids is the
 # single biggest response-size offender in the catalog (full-season box-score mode
 # re-embeds a complete nested-stats roster for both sides of every matchup, every
-# week; docs/ESPN_FANTASY_RESPONSE_SIZE_RESEARCH.md §2.1).
+# week; docs/ESPN_FANTASY_RESPONSE_SIZE_RESEARCH.md §2.1). Deliberately not derived
+# from the 50/150 KB budgets: even a few weeks of box-score data can still exceed
+# them in a large league, even at `detail="summary"` (§2.1's per-week estimate is
+# ~300-500 KB untrimmed) — `_shrink_to_size_cap` below is the actual byte-budget
+# enforcement, on both this and the count-based `_paginate_bounded` path. This
+# constant only bounds *week count*, which is what the issue asked for.
 _MAX_WEEKS_UNSCOPED = 3
 
 
@@ -353,23 +358,28 @@ def _summarize_roster_entry(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _trim_nested_roster(container: dict[str, Any], roster_key: str) -> dict[str, Any]:
+    """
+    Trim `container[roster_key]["entries"]` to the summary allowlist, if present —
+    shared by `_apply_roster_detail` (a team's `roster`) and `_apply_matchup_detail`
+    (a matchup side's `rosterForCurrentScoringPeriod`), which nest their roster
+    entries one level differently but trim them identically.
+    """
+    roster = container.get(roster_key) or {}
+    entries = roster.get("entries")
+    if not entries:
+        return container
+    return {
+        **container,
+        roster_key: {**roster, "entries": [_summarize_roster_entry(e) for e in entries]},
+    }
+
+
 def _apply_roster_detail(teams: list[dict[str, Any]], detail: str) -> list[dict[str, Any]]:
     """Apply `detail` to get_espn_rosters' `teams[]`, trimming each roster entry when `detail="summary"`."""
     if detail == "full":
         return teams
-
-    trimmed_teams = []
-    for team in teams:
-        roster = team.get("roster") or {}
-        entries = roster.get("entries")
-        if not entries:
-            trimmed_teams.append(team)
-            continue
-        trimmed_teams.append({
-            **team,
-            "roster": {**roster, "entries": [_summarize_roster_entry(e) for e in entries]},
-        })
-    return trimmed_teams
+    return [_trim_nested_roster(team, "roster") for team in teams]
 
 
 def _apply_matchup_detail(schedule: list[dict[str, Any]], detail: str) -> list[dict[str, Any]]:
@@ -381,18 +391,9 @@ def _apply_matchup_detail(schedule: list[dict[str, Any]], detail: str) -> list[d
     for matchup in schedule:
         trimmed_matchup = dict(matchup)
         for side_key in ("home", "away"):
-            side = matchup.get(side_key) or {}
-            roster = side.get("rosterForCurrentScoringPeriod") or {}
-            entries = roster.get("entries")
-            if not entries:
-                continue
-            trimmed_matchup[side_key] = {
-                **side,
-                "rosterForCurrentScoringPeriod": {
-                    **roster,
-                    "entries": [_summarize_roster_entry(e) for e in entries],
-                },
-            }
+            side = matchup.get(side_key)
+            if side:
+                trimmed_matchup[side_key] = _trim_nested_roster(side, "rosterForCurrentScoringPeriod")
         trimmed_schedule.append(trimmed_matchup)
     return trimmed_schedule
 
@@ -577,7 +578,7 @@ async def get_espn_free_agents(
 
 
 @handle_http_errors(
-    default_data={"rosters": []},
+    default_data={"rosters": [], "total_teams": 0, "has_more": False},
     operation_name="fetching ESPN league rosters",
 )
 @handle_espn_auth_errors
@@ -600,7 +601,13 @@ async def get_espn_rosters(
     identity, position, team, lineup slot, injury status, and actual applied
     total — dropping the full nested `stats[]`/`ownership` blocks that make a
     roster heavy regardless of team/roster-slot count. "full" returns entries
-    unfiltered.
+    unfiltered, still subject to the 150 KB hard cap below.
+
+    A final size check (`_shrink_to_size_cap`, ADR 0006) applies after
+    `detail` trimming, same as get_espn_players/get_espn_free_agents/
+    get_espn_matchups/get_espn_scoreboard — an oversized response (e.g.
+    `detail="full"` on a large roster) degrades by dropping teams from the
+    end rather than exceeding the cap, with `has_more` surfacing it.
 
     Args:
         league_id: The ESPN league ID.
@@ -613,6 +620,8 @@ async def get_espn_rosters(
         A dictionary containing:
         - rosters: One entry per team (team metadata + `roster.entries`,
           trimmed per `detail`)
+        - total_teams: Team count before any size-cap trimming
+        - has_more: Whether the 150 KB hard cap dropped any teams
         - success: Whether the request was successful
         - error: Error message (if any)
         - error_type: Type of error (if any)
@@ -632,8 +641,14 @@ async def get_espn_rosters(
         )
 
     teams = _apply_roster_detail(league_data.get("teams", []), detail)
+    total_teams = len(teams)
+    teams = _shrink_to_size_cap(teams)
 
-    return create_success_response({"rosters": teams})
+    return create_success_response({
+        "rosters": teams,
+        "total_teams": total_teams,
+        "has_more": len(teams) < total_teams,
+    })
 
 
 def _standings_sort_key(team: dict[str, Any]) -> int:
@@ -693,7 +708,7 @@ async def get_espn_standings(league_id: str, year: int | None = None) -> dict:
 
 
 @handle_http_errors(
-    default_data={"scoreboard": [], "total_weeks": 0},
+    default_data={"scoreboard": [], "total_weeks": 0, "has_more": False},
     operation_name="fetching ESPN scoreboard",
 )
 @handle_espn_auth_errors
@@ -762,7 +777,7 @@ async def get_espn_scoreboard(league_id: str, week: int | None = None, year: int
 
 
 @handle_http_errors(
-    default_data={"matchups": [], "total_weeks": 0},
+    default_data={"matchups": [], "total_weeks": 0, "has_more": False},
     operation_name="fetching ESPN matchups",
 )
 @handle_espn_auth_errors
@@ -778,7 +793,11 @@ async def get_espn_matchups(
     catalog category, docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §3). When
     `week` is given, scopes the request to that matchup period via ESPN's
     `x-fantasy-filter` header and also filters the returned schedule
-    client-side. When `week` is omitted, the schedule is capped to the most
+    client-side — since ESPN already narrows the response server-side in
+    this case, `total_weeks` reflects just the requested period, not a
+    season-wide count (unlike get_espn_scoreboard, which never sends that
+    header and so can report a true season total even when `week` is
+    given). When `week` is omitted, the schedule is capped to the most
     recent `_MAX_WEEKS_UNSCOPED` weeks (ADR 0006) instead of the full season
     — full-season box-score mode is this catalog's single biggest
     response-size offender, since every week re-embeds a full nested-stats
@@ -808,7 +827,11 @@ async def get_espn_matchups(
         A dictionary containing:
         - matchups: List of matchup entries with box-score/lineup detail
           (trimmed per `detail`)
-        - total_weeks: Distinct matchup periods in the full season's schedule
+        - total_weeks: Distinct matchup periods in the full season's
+          schedule when `week` is omitted; just the requested period
+          (1, or 0 if it matched nothing) when `week` is given, since
+          ESPN's `x-fantasy-filter` header already narrows the fetch
+          server-side in that case
         - has_more: Whether weeks (or, if the 150 KB hard cap kicked in,
           entries) were left out of `matchups`
         - success: Whether the request was successful
