@@ -2,8 +2,8 @@
 Consensus player market values (real valuation layer).
 
 This module fetches market-consensus player values from FantasyCalc — a free,
-key-less API that already attaches Sleeper player IDs to every player, so the
-values join directly onto Sleeper roster and draft data. Values are
+key-less API that already attaches ESPN player IDs to every player, so the
+values join directly onto ESPN roster and draft data. Values are
 format-aware (PPR level, superflex, league size, redraft vs. dynasty).
 
 It replaces the previous "everyone starts at 50" heuristic used by the trade
@@ -13,7 +13,7 @@ Design:
 - In-memory TTL cache per league format (values move slowly).
 - SQLite persistence via NFLDatabase (survives restarts, serves as stale
   fallback when the API is unreachable).
-- Lookups by Sleeper player_id (primary) or normalized name+position (fallback).
+- Lookups by ESPN player_id (primary) or normalized name+position (fallback).
 """
 
 from __future__ import annotations
@@ -89,12 +89,12 @@ def normalize_name(name: str | None) -> str:
 def _normalize_fantasycalc_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
     """Convert a FantasyCalc value object into our normalized value dict."""
     player = entry.get("player") or {}
-    sleeper_id = player.get("sleeperId")
-    if not sleeper_id:
-        # Without a Sleeper id we cannot join onto roster/draft data reliably.
+    espn_id = player.get("espnId")
+    if not espn_id:
+        # Without an ESPN id we cannot join onto roster/draft data reliably.
         return None
     return {
-        "player_id": str(sleeper_id),
+        "player_id": str(espn_id),
         "name": player.get("name"),
         "position": player.get("position"),
         "team": player.get("maybeTeam"),
@@ -326,10 +326,10 @@ async def get_player_value(
     dynasty: bool = False,
     db=None,
 ) -> dict[str, Any]:
-    """Get the consensus market value for a single player by Sleeper id or name.
+    """Get the consensus market value for a single player by ESPN id or name.
 
     Args:
-        player_id: Sleeper player id (preferred).
+        player_id: ESPN player id (preferred).
         name: Player name (fallback lookup).
         scoring / superflex / num_teams / dynasty: League format.
 
