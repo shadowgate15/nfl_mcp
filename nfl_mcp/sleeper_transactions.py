@@ -21,7 +21,7 @@ from .errors import (
     handle_http_errors,
     handle_validation_error,
 )
-from .sleeper_enrichment import _enrich_usage_and_opponent
+from .nfl_enrichment import _enrich_usage_and_opponent
 from .sleeper_tools import _enrich_single, _init_db, get_nfl_state
 
 logger = logging.getLogger(__name__)

@@ -110,9 +110,9 @@ async def _prefetch_loop(nfl_db: NFLDatabase, shutdown_event: asyncio.Event):
         return
 
     # Import late to avoid circular
+    from .injury_service import get_injury_reports
     from .sleeper_tools import (
         ADVANCED_ENRICH_ENABLED,
-        _fetch_injuries,
         _fetch_practice_reports,
         _fetch_week_player_snaps,
         _fetch_week_schedule,
@@ -262,7 +262,7 @@ async def _prefetch_loop(nfl_db: NFLDatabase, shutdown_event: asyncio.Event):
                         logger.debug(
                             f"[Prefetch Cycle #{cycle_count}] Fetching injury reports for all teams"
                         )
-                        injuries = await _fetch_injuries()
+                        injuries = await get_injury_reports(db=nfl_db)
                         if injuries:
                             inserted = nfl_db.upsert_injuries(injuries)
                             stats["injuries_inserted"] = inserted

@@ -30,19 +30,22 @@ from .errors import (
 
 logger = logging.getLogger(__name__)
 
-# The enrichment/data-fetch layer lives in sleeper_enrichment.py. Re-import it
-# here so both internal callers and external `sleeper_tools.<name>` references
-# keep working unchanged after the split.
-from .sleeper_enrichment import (  # noqa: F401
-    ADVANCED_ENRICH_ENABLED,
+# The Sleeper-id-keyed enrichment/data-fetch layer lives in sleeper_enrichment.py;
+# the ESPN-core-only leaf helpers live in nfl_enrichment.py (ADR 0007). Re-import
+# both here so both internal callers and external `sleeper_tools.<name>`
+# references keep working unchanged after the split.
+from .nfl_enrichment import (  # noqa: F401
     _calculate_usage_trend,
     _enrich_usage_and_opponent,
     _estimate_snap_pct,
     _fetch_all_team_schedules,
-    _fetch_injuries,
     _fetch_practice_reports,
-    _fetch_week_player_snaps,
     _fetch_week_schedule,
+    get_current_nfl_week,
+)
+from .sleeper_enrichment import (  # noqa: F401
+    ADVANCED_ENRICH_ENABLED,
+    _fetch_week_player_snaps,
     _fetch_weekly_usage_stats,
 )
 
