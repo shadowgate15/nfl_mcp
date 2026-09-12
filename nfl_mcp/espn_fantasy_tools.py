@@ -602,7 +602,7 @@ async def get_espn_free_agents(
 
 
 @handle_http_errors(
-    default_data={"rosters": [], "total_teams": 0, "has_more": False},
+    default_data={"rosters": [], "members": [], "total_teams": 0, "has_more": False},
     operation_name="fetching ESPN league rosters",
 )
 @handle_espn_auth_errors
@@ -644,6 +644,10 @@ async def get_espn_rosters(
         A dictionary containing:
         - rosters: One entry per team (team metadata + `roster.entries`,
           trimmed per `detail`)
+        - members: The league's `members[]` array (opaque member-id ->
+          `displayName`/`firstName`/`lastName` identity), undiscarded so
+          callers can resolve `rosters[].owners`/`primaryOwner` via
+          `resolve_team_owner_names`
         - total_teams: Team count before any size-cap trimming
         - has_more: Whether the 150 KB hard cap dropped any teams
         - success: Whether the request was successful
@@ -670,9 +674,54 @@ async def get_espn_rosters(
 
     return create_success_response({
         "rosters": teams,
+        "members": league_data.get("members", []),
         "total_teams": total_teams,
         "has_more": len(teams) < total_teams,
     })
+
+
+def resolve_team_owner_names(
+    rosters: list[dict[str, Any]], members: list[dict[str, Any]]
+) -> dict[int, str]:
+    """
+    Resolve each team's primary owner to a human-readable display name.
+
+    `get_espn_rosters`' `rosters[]` entries carry `owners: [memberId, ...]`
+    and `primaryOwner: memberId` — opaque member-id strings, not names
+    (docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §2). The resolved identity lives
+    in the sibling `members[]` array `get_espn_rosters` also returns, keyed
+    by that same member id. This is the one shared implementation of that
+    join (ADR 0005/0007) — only a display name is resolved, since no current
+    caller needs a co-manager list, an avatar, or a commissioner flag.
+
+    Args:
+        rosters: `get_espn_rosters`' `rosters` list (or any list of ESPN
+            `teams[]` entries with `id`/`owners`/`primaryOwner`).
+        members: `get_espn_rosters`' `members` list.
+
+    Returns:
+        A `team["id"] -> display name` mapping. A team is omitted if its
+        `primaryOwner` (falling back to its first `owners` entry) doesn't
+        resolve to a known member.
+    """
+    members_by_id = {member.get("id"): member for member in members}
+
+    names: dict[int, str] = {}
+    for team in rosters:
+        team_id = team.get("id")
+        if team_id is None:
+            continue
+        owners = team.get("owners") or []
+        owner_id = team.get("primaryOwner") or (owners[0] if owners else None)
+        member = members_by_id.get(owner_id)
+        if not member:
+            continue
+        display_name = member.get("displayName") or (
+            f"{member.get('firstName', '')} {member.get('lastName', '')}".strip()
+        )
+        names[team_id] = display_name
+
+    return names
 
 
 def _standings_sort_key(team: dict[str, Any]) -> int:

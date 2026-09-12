@@ -38,6 +38,21 @@ Covers get_espn_rosters:
 - success path on the pre-2018 leagueHistory array-wrapped envelope
 - missing-credentials short-circuit
 - registration in tool_registry.get_all_tools()
+- the league response's top-level members[] is surfaced undiscarded,
+  defaulting to [] when absent (issue #44)
+
+Covers _extract_player, the shared roster-entry player-extraction helper
+(issue #44): both of ESPN's player-nesting shapes
+(playerPoolEntry.player vs. a bare player), and a missing player
+returning {} rather than raising.
+
+Covers resolve_team_owner_names, the shared owners-id-to-members-id join
+(issue #44, ADR 0005/0007): resolution via primaryOwner, a co-manager
+team resolving to just the primary owner's name (not a list), falling
+back to the first owners[] entry when primaryOwner is absent, falling
+back to firstName/lastName when displayName is absent, omitting teams
+whose owner id has no matching member or that have no owners at all,
+and resolving multiple teams in rosters[] independently.
 
 Covers get_espn_standings:
 - sort/tiebreak derivation from teams[] (rankFinal, then
@@ -84,6 +99,7 @@ import pytest
 from nfl_mcp.errors import ErrorType
 from nfl_mcp.espn_errors import classify_espn_auth_error
 from nfl_mcp.espn_fantasy_tools import (
+    _extract_player,
     get_espn_draft,
     get_espn_free_agents,
     get_espn_league,
@@ -95,6 +111,7 @@ from nfl_mcp.espn_fantasy_tools import (
     get_espn_standings,
     get_espn_transactions,
     handle_espn_auth_errors,
+    resolve_team_owner_names,
 )
 
 
@@ -853,6 +870,7 @@ class TestGetEspnRosters:
         assert result["success"] is False
         assert result["error_type"] == ErrorType.HTTP
         assert result["rosters"] == []
+        assert result["members"] == []
 
     def test_registered_in_tool_registry(self):
         """get_espn_rosters is present in tool_registry.get_all_tools()."""
@@ -1005,6 +1023,133 @@ class TestGetEspnRosters:
         assert result["total_teams"] == 16
         assert result["has_more"] is True
         assert len(result["rosters"]) < 16
+
+    @pytest.mark.asyncio
+    async def test_members_surfaced_alongside_rosters(self, monkeypatch):
+        """The league response's top-level `members[]` is returned undiscarded."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        members = [{"id": "{abc}", "displayName": "someuser", "firstName": "Some", "lastName": "User"}]
+        league_object = {"teams": [{"id": 1, "roster": {"entries": []}}], "members": members}
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = league_object
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_rosters("1234", year=2018)
+
+        assert result["success"] is True
+        assert result["members"] == members
+
+    @pytest.mark.asyncio
+    async def test_members_defaults_to_empty_list_when_absent(self, monkeypatch):
+        """A league response with no `members` key surfaces `members: []`, not a KeyError."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"teams": []}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_rosters("1234", year=2018)
+
+        assert result["success"] is True
+        assert result["members"] == []
+
+
+class TestExtractPlayer:
+    """Test _extract_player, the shared roster-entry player extraction helper."""
+
+    def test_nested_under_player_pool_entry(self):
+        """The `playerPoolEntry.player` nesting (e.g. free-agent/matchup box-score entries)."""
+        entry = {"lineupSlotId": 2, "playerPoolEntry": {"player": {"id": 101, "fullName": "Nested Guy"}}}
+
+        assert _extract_player(entry) == {"id": 101, "fullName": "Nested Guy"}
+
+    def test_bare_player(self):
+        """The bare `player` nesting (e.g. some roster views)."""
+        entry = {"lineupSlotId": 2, "player": {"id": 202, "fullName": "Bare Guy"}}
+
+        assert _extract_player(entry) == {"id": 202, "fullName": "Bare Guy"}
+
+    def test_missing_player_returns_empty_dict(self):
+        """An entry with neither nesting returns {} rather than raising."""
+        assert _extract_player({"lineupSlotId": 2}) == {}
+
+
+class TestResolveTeamOwnerNames:
+    """Test resolve_team_owner_names, the shared owners-id-to-members-id join (ADR 0005/0007)."""
+
+    def test_resolves_via_primary_owner(self):
+        """A team's primaryOwner id resolves to that member's displayName."""
+        rosters = [{"id": 1, "owners": ["{owner-1}"], "primaryOwner": "{owner-1}"}]
+        members = [{"id": "{owner-1}", "displayName": "someuser", "firstName": "Some", "lastName": "User"}]
+
+        assert resolve_team_owner_names(rosters, members) == {1: "someuser"}
+
+    def test_co_managers_resolve_to_primary_owner_only(self):
+        """A team with multiple owners (co-managers) resolves to just the primaryOwner's name,
+        not a list — no current caller consumes a co-manager list (issue #44)."""
+        rosters = [{
+            "id": 1,
+            "owners": ["{owner-1}", "{owner-2}"],
+            "primaryOwner": "{owner-2}",
+        }]
+        members = [
+            {"id": "{owner-1}", "displayName": "first-owner"},
+            {"id": "{owner-2}", "displayName": "second-owner"},
+        ]
+
+        assert resolve_team_owner_names(rosters, members) == {1: "second-owner"}
+
+    def test_falls_back_to_first_owner_when_primary_owner_missing(self):
+        """With no primaryOwner, the first entry in owners[] is used instead."""
+        rosters = [{"id": 1, "owners": ["{owner-1}"]}]
+        members = [{"id": "{owner-1}", "displayName": "someuser"}]
+
+        assert resolve_team_owner_names(rosters, members) == {1: "someuser"}
+
+    def test_falls_back_to_first_and_last_name_when_display_name_missing(self):
+        """A member with no displayName resolves to "firstName lastName" instead."""
+        rosters = [{"id": 1, "owners": ["{owner-1}"], "primaryOwner": "{owner-1}"}]
+        members = [{"id": "{owner-1}", "firstName": "Some", "lastName": "User"}]
+
+        assert resolve_team_owner_names(rosters, members) == {1: "Some User"}
+
+    def test_unresolvable_owner_is_omitted(self):
+        """A team whose owner id has no matching member is left out of the mapping."""
+        rosters = [{"id": 1, "owners": ["{unknown}"], "primaryOwner": "{unknown}"}]
+
+        assert resolve_team_owner_names(rosters, members=[]) == {}
+
+    def test_team_with_no_owners_is_omitted(self):
+        """A team with neither owners nor primaryOwner is left out of the mapping."""
+        rosters = [{"id": 1}]
+        members = [{"id": "{owner-1}", "displayName": "someuser"}]
+
+        assert resolve_team_owner_names(rosters, members) == {}
+
+    def test_multiple_teams(self):
+        """Each team in rosters[] resolves independently."""
+        rosters = [
+            {"id": 1, "owners": ["{owner-1}"], "primaryOwner": "{owner-1}"},
+            {"id": 2, "owners": ["{owner-2}"], "primaryOwner": "{owner-2}"},
+        ]
+        members = [
+            {"id": "{owner-1}", "displayName": "first-team-owner"},
+            {"id": "{owner-2}", "displayName": "second-team-owner"},
+        ]
+
+        assert resolve_team_owner_names(rosters, members) == {
+            1: "first-team-owner",
+            2: "second-team-owner",
+        }
 
 
 class TestGetEspnStandings:
