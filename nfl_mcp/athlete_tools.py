@@ -8,31 +8,10 @@ from . import espn_fantasy_tools
 from .config import LIMITS, validate_limit
 from .errors import create_success_response, handle_database_errors, handle_http_errors
 
-# ESPN `defaultPositionId` -> position abbreviation. Same static-map pattern as
-# `coaching_tools.TEAM_ID_MAP`: no existing table to join this against.
-# `16 -> "DST"` is relied on by streaming/handcuff DST lookups (ADR 0007).
-POSITION_ID_MAP = {
-    0: "QB",
-    1: "QB",
-    2: "RB",
-    3: "WR",
-    4: "WR",
-    5: "WR",
-    6: "TE",
-    7: "OP",
-    8: "DT",
-    9: "DE",
-    10: "LB",
-    11: "DL",
-    12: "CB",
-    13: "S",
-    14: "DB",
-    15: "DP",
-    16: "DST",
-    17: "K",
-    18: "P",
-    19: "HC",
-}
+# Re-exported for backward compatibility: this map lives in espn_fantasy_tools
+# (its canonical home, shared with that module's enrich_roster_entries) to
+# avoid a circular import, since this module already imports that one.
+POSITION_ID_MAP = espn_fantasy_tools.POSITION_ID_MAP
 
 
 @handle_http_errors(

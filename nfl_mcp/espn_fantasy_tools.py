@@ -17,7 +17,10 @@ without callers ever seeing it:
 `get_espn_standings`, `get_espn_scoreboard`, `get_espn_matchups`,
 `get_espn_draft`, `get_espn_transactions`, `get_espn_players`, and
 `get_espn_free_agents` round out the rest of the catalog as siblings in
-this module.
+this module. `resolve_team_owner_names` and `enrich_roster_entries` are
+shared cross-module helpers built on this module's raw-shape parsing
+(`_extract_player`, `POSITION_ID_MAP`) for downstream modules that need
+owner identity or enriched per-player roster data (ADR 0005/0007).
 """
 
 import json
@@ -722,6 +725,93 @@ def resolve_team_owner_names(
         names[team_id] = display_name
 
     return names
+
+
+# ESPN `defaultPositionId` -> position abbreviation. Canonical home for this
+# map even though `athlete_tools.fetch_athletes` is its primary populator
+# (ADR 0005) -- `enrich_roster_entries` below needs it too, for a player id
+# that isn't in the cache yet, and `athlete_tools.py` already imports this
+# module, so the map lives here to avoid a circular import back out to
+# `athlete_tools`. Same static-map pattern as `coaching_tools.TEAM_ID_MAP`:
+# no existing table to join this against. `16 -> "DST"` is relied on by
+# streaming/handcuff DST lookups (ADR 0007).
+POSITION_ID_MAP = {
+    0: "QB",
+    1: "QB",
+    2: "RB",
+    3: "WR",
+    4: "WR",
+    5: "WR",
+    6: "TE",
+    7: "OP",
+    8: "DT",
+    9: "DE",
+    10: "LB",
+    11: "DL",
+    12: "CB",
+    13: "S",
+    14: "DB",
+    15: "DP",
+    16: "DST",
+    17: "K",
+    18: "P",
+    19: "HC",
+}
+
+
+def enrich_roster_entries(
+    entries: list[dict[str, Any]], player_cache: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """
+    Reconstruct enriched player dicts from raw ESPN roster/box-score entries.
+
+    Layers on `_extract_player` to pull each entry's player object out of
+    ESPN's two nesting shapes, then joins the player's id against
+    `player_cache` -- the ESPN-keyed player-identity cache
+    `athlete_tools.fetch_athletes` populates (`str(player_id) -> {full_name,
+    team, position, status}`) -- for the name/team/position fields both
+    `faab_tools.py` (marginal-upgrade calculations) and
+    `trade_analyzer_tools.py` (positional-needs calculations) need to
+    rebuild their enriched-player lists (ADR 0007), rather than each module
+    re-parsing ESPN's roster nesting and re-joining the cache itself.
+
+    A player id absent from `player_cache` (e.g. a recent add the cache
+    hasn't refreshed to pick up yet) still produces an entry rather than
+    being dropped: name/position fall back to the raw ESPN player's own
+    `fullName`/`defaultPositionId` (via `POSITION_ID_MAP`), per field, so a
+    cached entry with a blank `full_name` or `position` also gets the same
+    fallback rather than surfacing an empty value; team has no such
+    fallback and stays `""`.
+
+    Args:
+        entries: Raw ESPN roster/box-score entries -- `roster.entries` from
+            get_espn_rosters, or a matchup side's
+            `rosterForCurrentScoringPeriod.entries` from get_espn_matchups
+            -- fetched with `detail="full"` (summary-trimmed entries have
+            already discarded the fields this helper reads).
+        player_cache: The ESPN-keyed player-identity cache, as populated by
+            `athlete_tools.fetch_athletes`: `str(player_id) -> {full_name,
+            team, position, status}`.
+
+    Returns:
+        One enriched dict per entry, in `entries` order: `player_id`,
+        `full_name`, `position`, `team`, `lineup_slot_id`.
+    """
+    enriched: list[dict[str, Any]] = []
+    for entry in entries:
+        player = _extract_player(entry)
+        player_id = player.get("id")
+        cached = (player_cache.get(str(player_id)) if player_id is not None else None) or {}
+
+        enriched.append({
+            "player_id": player_id,
+            "full_name": cached.get("full_name") or player.get("fullName"),
+            "position": cached.get("position") or POSITION_ID_MAP.get(player.get("defaultPositionId"), ""),
+            "team": cached.get("team", ""),
+            "lineup_slot_id": entry.get("lineupSlotId"),
+        })
+
+    return enriched
 
 
 def _standings_sort_key(team: dict[str, Any]) -> int:

@@ -54,6 +54,14 @@ back to firstName/lastName when displayName is absent, omitting teams
 whose owner id has no matching member or that have no owners at all,
 and resolving multiple teams in rosters[] independently.
 
+Covers enrich_roster_entries, the shared roster-entry-to-enriched-player
+helper (issue #45, ADR 0007): both of ESPN's player-nesting shapes via
+_extract_player, joining a cached player id against player_cache for
+name/team/position, falling back to the raw ESPN player's own fullName
+and defaultPositionId (via POSITION_ID_MAP) for a player id missing from
+the cache, and preserving lineupSlotId/entries order across multiple
+entries.
+
 Covers get_espn_standings:
 - sort/tiebreak derivation from teams[] (rankFinal, then
   rankCalculatedFinal, then playoffSeed)
@@ -99,7 +107,9 @@ import pytest
 from nfl_mcp.errors import ErrorType
 from nfl_mcp.espn_errors import classify_espn_auth_error
 from nfl_mcp.espn_fantasy_tools import (
+    POSITION_ID_MAP,
     _extract_player,
+    enrich_roster_entries,
     get_espn_draft,
     get_espn_free_agents,
     get_espn_league,
@@ -1150,6 +1160,91 @@ class TestResolveTeamOwnerNames:
             1: "first-team-owner",
             2: "second-team-owner",
         }
+
+
+class TestEnrichRosterEntries:
+    """Test enrich_roster_entries, the shared roster-entry-to-enriched-player join (ADR 0007)."""
+
+    def test_joins_bare_player_against_cache(self):
+        """A bare `entry["player"]` nesting joins against player_cache by id."""
+        entries = [{"player": {"id": 4429795, "fullName": "Raw Name", "defaultPositionId": 2}, "lineupSlotId": 2}]
+        player_cache = {"4429795": {"full_name": "Cached Name", "team": "SF", "position": "RB", "status": "Active"}}
+
+        assert enrich_roster_entries(entries, player_cache) == [{
+            "player_id": 4429795,
+            "full_name": "Cached Name",
+            "position": "RB",
+            "team": "SF",
+            "lineup_slot_id": 2,
+        }]
+
+    def test_joins_playerpoolentry_nested_player_against_cache(self):
+        """A `playerPoolEntry.player` nesting also joins against player_cache by id."""
+        entries = [{
+            "playerPoolEntry": {"player": {"id": 101, "fullName": "Raw Name", "defaultPositionId": 6}},
+            "lineupSlotId": 6,
+        }]
+        player_cache = {"101": {"full_name": "Cached TE", "team": "KC", "position": "TE", "status": "Active"}}
+
+        assert enrich_roster_entries(entries, player_cache) == [{
+            "player_id": 101,
+            "full_name": "Cached TE",
+            "position": "TE",
+            "team": "KC",
+            "lineup_slot_id": 6,
+        }]
+
+    def test_player_missing_from_cache_falls_back_to_raw_espn_fields(self):
+        """A player id absent from player_cache still produces an entry, using the raw
+        ESPN player's own fullName/defaultPositionId (via POSITION_ID_MAP) instead of
+        being dropped."""
+        entries = [{"player": {"id": 999, "fullName": "Uncached Guy", "defaultPositionId": 16}, "lineupSlotId": 20}]
+
+        result = enrich_roster_entries(entries, player_cache={})
+
+        assert result == [{
+            "player_id": 999,
+            "full_name": "Uncached Guy",
+            "position": "DST",
+            "team": "",
+            "lineup_slot_id": 20,
+        }]
+        assert POSITION_ID_MAP[16] == "DST"
+
+    def test_multiple_entries_preserve_order(self):
+        """Enriched dicts come back in the same order as the input entries."""
+        entries = [
+            {"player": {"id": 1, "fullName": "First"}, "lineupSlotId": 0},
+            {"player": {"id": 2, "fullName": "Second"}, "lineupSlotId": 1},
+        ]
+        player_cache = {
+            "1": {"full_name": "First Cached", "team": "SF", "position": "QB", "status": "Active"},
+            "2": {"full_name": "Second Cached", "team": "KC", "position": "WR", "status": "Active"},
+        }
+
+        result = enrich_roster_entries(entries, player_cache)
+
+        assert [p["player_id"] for p in result] == [1, 2]
+        assert [p["full_name"] for p in result] == ["First Cached", "Second Cached"]
+
+    def test_empty_entries_returns_empty_list(self):
+        assert enrich_roster_entries([], player_cache={}) == []
+
+    def test_cached_entry_with_blank_position_falls_back_to_raw_espn_field(self):
+        """A cached entry present but missing `position` still falls back to
+        POSITION_ID_MAP, per field, rather than surfacing a blank value."""
+        entries = [{"player": {"id": 5, "fullName": "Raw Name", "defaultPositionId": 17}, "lineupSlotId": 17}]
+        player_cache = {"5": {"full_name": "", "team": "KC", "position": "", "status": "Active"}}
+
+        result = enrich_roster_entries(entries, player_cache)
+
+        assert result == [{
+            "player_id": 5,
+            "full_name": "Raw Name",
+            "position": "K",
+            "team": "KC",
+            "lineup_slot_id": 17,
+        }]
 
 
 class TestGetEspnStandings:
