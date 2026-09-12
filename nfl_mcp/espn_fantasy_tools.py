@@ -443,6 +443,40 @@ async def get_espn_league(league_id: str, year: int | None = None) -> dict:
 _ACTIVE_PLAYERS_FILTER_HEADER = json.dumps({"filterActive": {"value": True}})
 
 
+async def fetch_all_espn_players(year: int | None = None) -> list[dict[str, Any]]:
+    """
+    Fetch the full ESPN pro-player pool for a season, unpaginated.
+
+    The leaf HTTP call behind `get_espn_players`, split out so a caller that
+    genuinely needs the whole pool (e.g. `athlete_tools.fetch_athletes`
+    rebuilding the player-identity cache) can fetch it once directly, rather
+    than looping `get_espn_players`' page endpoint and re-fetching this same
+    ~600-900 KB response on every page (issue #43). Raises on HTTP failure
+    like any other unwrapped leaf helper; callers wrap with
+    `@handle_http_errors` if they want the standard error envelope.
+
+    Args:
+        year: Season year; defaults to the current year if omitted.
+
+    Returns:
+        The full pro-player pool (unpaginated, unfiltered beyond ESPN's own
+        `filterActive` header).
+    """
+    resolved_year = _resolve_year(year)
+    url = f"{FANTASY_BASE_ENDPOINT}ffl/seasons/{resolved_year}/players"
+
+    headers = {**get_http_headers("espn_fantasy"), "x-fantasy-filter": _ACTIVE_PLAYERS_FILTER_HEADER}
+
+    async with create_http_client() as client:
+        response = await client.get(url, params=[("view", "players_wl")], headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+    # ESPN's raw response here is a bare JSON array (unlike every league-scoped
+    # players view, which wraps in `{"players": [...]}`) — normalize both shapes.
+    return data if isinstance(data, list) else data.get("players", [])
+
+
 @handle_http_errors(
     default_data={"players": []},
     operation_name="fetching ESPN pro player pool",
@@ -479,17 +513,7 @@ async def get_espn_players(year: int | None = None, limit: int = 25, offset: int
         - error: Error message (if any)
         - error_type: Type of error (if any)
     """
-    resolved_year = _resolve_year(year)
-    url = f"{FANTASY_BASE_ENDPOINT}ffl/seasons/{resolved_year}/players"
-
-    headers = {**get_http_headers("espn_fantasy"), "x-fantasy-filter": _ACTIVE_PLAYERS_FILTER_HEADER}
-
-    async with create_http_client() as client:
-        response = await client.get(url, params=[("view", "players_wl")], headers=headers)
-        response.raise_for_status()
-        data = response.json()
-
-    players = data if isinstance(data, list) else data.get("players", [])
+    players = await fetch_all_espn_players(year)
     page, total_players, has_more = _paginate_bounded(players, limit, offset)
 
     return create_success_response({

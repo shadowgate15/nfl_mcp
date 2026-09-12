@@ -686,7 +686,7 @@ async def crawl_url(url: str, max_length: int | None = 10000) -> dict:
 
 @timing_decorator("fetch_athletes", tool_type="athlete")
 async def fetch_athletes() -> dict:
-    """Fetch all NFL players from Sleeper API and store in database.
+    """Fetch all NFL players from ESPN and store in database.
 
     Returns: {athletes_count, last_updated, success, error?}
     Example: fetch_athletes()

@@ -4,21 +4,52 @@ Athlete-related MCP tools for the NFL MCP Server.
 This module contains MCP tools for fetching, searching, and managing NFL athlete data.
 """
 
-
-from .config import LIMITS, LONG_TIMEOUT, create_http_client, get_http_headers, validate_limit
+from . import espn_fantasy_tools
+from .config import LIMITS, validate_limit
 from .errors import create_success_response, handle_database_errors, handle_http_errors
+
+# ESPN `defaultPositionId` -> position abbreviation. Same static-map pattern as
+# `coaching_tools.TEAM_ID_MAP`: no existing table to join this against.
+# `16 -> "DST"` is relied on by streaming/handcuff DST lookups (ADR 0007).
+POSITION_ID_MAP = {
+    0: "QB",
+    1: "QB",
+    2: "RB",
+    3: "WR",
+    4: "WR",
+    5: "WR",
+    6: "TE",
+    7: "OP",
+    8: "DT",
+    9: "DE",
+    10: "LB",
+    11: "DL",
+    12: "CB",
+    13: "S",
+    14: "DB",
+    15: "DP",
+    16: "DST",
+    17: "K",
+    18: "P",
+    19: "HC",
+}
 
 
 @handle_http_errors(
     default_data={"athletes_count": 0, "last_updated": None},
-    operation_name="fetching athletes from Sleeper API"
+    operation_name="fetching athletes from ESPN API"
 )
 async def fetch_athletes(nfl_db) -> dict:
     """
-    Fetch all NFL players from Sleeper API and store them in the local database.
+    Fetch the full ESPN pro-player pool and store it in the local database.
 
-    This tool fetches the complete athlete roster from Sleeper's API and
-    upserts the data into the SQLite database for fast local lookups.
+    Sources from `espn_fantasy_tools.fetch_all_espn_players`, the unpaginated
+    leaf fetch behind `get_espn_players` — since that tool now paginates its
+    response (ADR 0006), this cache needs the full pool in one shot rather
+    than looping pages. The cache is keyed on ESPN player ids end to end;
+    `proTeamId` is resolved to a team abbreviation via the existing `teams`
+    table (same numeric id space, no new mapping table), and
+    `defaultPositionId` via `POSITION_ID_MAP`.
 
     Args:
         nfl_db: The NFLDatabase instance to store data in
@@ -31,27 +62,39 @@ async def fetch_athletes(nfl_db) -> dict:
         - error: Error message (if any)
         - error_type: Type of error (if any)
     """
-    headers = get_http_headers("athletes")
+    players = await espn_fantasy_tools.fetch_all_espn_players()
 
-    # Sleeper API endpoint for all players
-    url = "https://api.sleeper.app/v1/players/nfl"
+    # `teams.id` is ESPN-core's own string team id (nfl_tools.fetch_teams), and
+    # `proTeamId` is the same numeric id space (ADR 0005, live-probed) — cast to
+    # str() on both sides of the lookup for the join to line up.
+    team_abbrev_by_pro_team_id = {
+        team["id"]: team["abbreviation"] for team in nfl_db.get_all_teams()
+    }
 
-    async with create_http_client(LONG_TIMEOUT) as client:
-        # Fetch the athletes from Sleeper API
-        response = await client.get(url, headers=headers)
-        response.raise_for_status()
+    athletes_data = {}
+    for player in players:
+        player_id = player.get("id")
+        if player_id is None:
+            continue
 
-        # Parse JSON response
-        athletes_data = response.json()
+        pro_team_id = player.get("proTeamId")
+        athletes_data[str(player_id)] = {
+            "full_name": player.get("fullName", "") or "",
+            "first_name": player.get("firstName", "") or "",
+            "last_name": player.get("lastName", "") or "",
+            "team": team_abbrev_by_pro_team_id.get(str(pro_team_id), ""),
+            "position": POSITION_ID_MAP.get(player.get("defaultPositionId"), ""),
+            "status": "Active" if player.get("active") else "Inactive",
+        }
 
-        # Store in database
-        count = nfl_db.upsert_athletes(athletes_data)
-        last_updated = nfl_db.get_last_updated()
+    # Store in database
+    count = nfl_db.upsert_athletes(athletes_data)
+    last_updated = nfl_db.get_last_updated()
 
-        return create_success_response({
-            "athletes_count": count,
-            "last_updated": last_updated
-        })
+    return create_success_response({
+        "athletes_count": count,
+        "last_updated": last_updated
+    })
 
 
 @handle_database_errors(
