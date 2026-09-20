@@ -100,7 +100,7 @@ class TestGetWeatherForecast:
     @pytest.mark.asyncio
     async def test_sorts_worst_first_and_domes_neutral(self):
         windy = {"wind_mph": 26.0, "precip_in": 0.1, "temp_f": 30.0}
-        with patch("nfl_mcp.sleeper_tools._fetch_week_schedule",
+        with patch("nfl_mcp.nfl_enrichment._fetch_week_schedule",
                    new=AsyncMock(return_value=self._schedule())), \
              patch("nfl_mcp.weather_tools._fetch_open_meteo",
                    new=AsyncMock(return_value=windy)) as mock_meteo:
@@ -121,7 +121,7 @@ class TestGetWeatherForecast:
 
     @pytest.mark.asyncio
     async def test_team_filter(self):
-        with patch("nfl_mcp.sleeper_tools._fetch_week_schedule",
+        with patch("nfl_mcp.nfl_enrichment._fetch_week_schedule",
                    new=AsyncMock(return_value=self._schedule())), \
              patch("nfl_mcp.weather_tools._fetch_open_meteo",
                    new=AsyncMock(return_value={"wind_mph": 10.0, "precip_in": 0.0, "temp_f": 50.0})):
@@ -145,7 +145,7 @@ class TestForecastUnavailable:
             {"team": "GB", "opponent": "CHI", "is_home": 1, "kickoff": "2026-09-13T17:00Z"},
             {"team": "CHI", "opponent": "GB", "is_home": 0, "kickoff": "2026-09-13T17:00Z"},
         ]
-        with patch("nfl_mcp.sleeper_tools._fetch_week_schedule",
+        with patch("nfl_mcp.nfl_enrichment._fetch_week_schedule",
                    new=AsyncMock(return_value=rows)), \
              patch("nfl_mcp.weather_tools._fetch_open_meteo",
                    new=AsyncMock(return_value=None)):
