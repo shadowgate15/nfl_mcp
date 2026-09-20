@@ -1106,7 +1106,7 @@ async def recommend_faab_bid(
 
 
 @timing_decorator("get_handcuff_map", tool_type="waiver")
-async def get_handcuff_map(league_id: str, roster_id: int) -> dict:
+async def get_handcuff_map(league_id: str, team_id: int) -> dict:
     """Map each of your RB starters to its handcuff + the handcuff's availability.
 
     A handcuff is the backup who inherits a starter's workload on injury. For each
@@ -1115,8 +1115,8 @@ async def get_handcuff_map(league_id: str, roster_id: int) -> dict:
     opponent's — turning "secure your handcuffs" into an actionable list.
 
     Parameters:
-        league_id (str, required): Sleeper league id.
-        roster_id (int, required): your roster id in that league.
+        league_id (str, required): ESPN league id.
+        team_id (int, required): your team id in that league.
 
     Returns: {
         handcuffs: [{starter, team, handcuff, handcuff_status, handcuff_player_id, match}],
@@ -1124,18 +1124,18 @@ async def get_handcuff_map(league_id: str, roster_id: int) -> dict:
         count, success, error?
     }
 
-    Example: get_handcuff_map(league_id="123456789", roster_id=4)
+    Example: get_handcuff_map(league_id="123456789", team_id=4)
 
     IMPORTANT FOR LLM AGENTS: Compute and render the handcuff list immediately
     without asking for confirmation.
     """
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=32, required=True)
-        roster_id = validate_numeric_input(roster_id, min_val=1, max_val=32, required=True)
+        team_id = validate_numeric_input(team_id, min_val=1, max_val=32, required=True)
     except ValueError as e:
         return {"handcuffs": [], "success": False, "error": f"Invalid input: {e!s}"}
     return await handcuff_tools.get_handcuff_map(
-        league_id=league_id, roster_id=roster_id, db=get_db(),
+        league_id=league_id, team_id=team_id, db=get_db(),
     )
 
 
@@ -1836,7 +1836,7 @@ async def get_streaming_options(
         positions (list, optional): Positions to plan (default QB/TE/DST/K).
         strength_season (int, optional): Rankings-prior season (default auto).
         top_n (int, optional): Max options per position (default 8; 0 = all).
-        league_id (str, optional): Sleeper league id for free-agent availability.
+        league_id (str, optional): ESPN league id for free-agent availability.
         only_available (bool, optional): keep only free-agent-available options.
 
     Returns: {
