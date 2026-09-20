@@ -165,24 +165,27 @@ def _needs_defense(positions: list[str]) -> bool:
 
 async def _rostered_ids(league_id: str) -> tuple[set, bool]:
     """Return (set of rostered player_ids, rosters_available)."""
-    from . import sleeper_tools
-    resp = await sleeper_tools.get_rosters(league_id)
-    rosters = resp.get("rosters") or []
-    rostered = {str(pid) for r in rosters for pid in (r.get("players") or [])}
-    return rostered, bool(rosters)
+    from . import espn_fantasy_tools
+    resp = await espn_fantasy_tools.get_espn_rosters(league_id, detail="full")
+    teams = resp.get("rosters") or []
+    rostered: set = set()
+    for t in teams:
+        entries = (t.get("roster") or {}).get("entries") or []
+        for p in espn_fantasy_tools.enrich_roster_entries(entries, {}):
+            pid = p.get("player_id")
+            if pid is not None:
+                rostered.add(str(pid))
+    return rostered, bool(teams)
 
 
 def _unit_availability(position: str, team: str, rostered: set, db) -> dict:
     """Availability of a team's streamable unit at ``position`` in the league.
 
-    DST maps 1:1 (Sleeper DST id = team abbreviation). K/QB/TE/RB/WR enumerate the
-    team's players at that position from the athletes cache, each flagged
-    free_agent/rostered (a specific starter isn't singled out — a design note).
+    DST and K/QB/TE/RB/WR alike enumerate the team's players at that position
+    from the athletes cache, each flagged free_agent/rostered (a specific
+    starter isn't singled out — a design note).
     """
     pos, team = position.upper(), (team or "").upper()
-    if pos in ("DST", "DEF"):
-        status = "rostered" if team in rostered else "free_agent"
-        return {"unit_player_id": team, "status": status, "has_free_agent": status == "free_agent"}
     players = []
     for a in (db.get_athletes_by_team(team) or []) if db else []:
         if (a.get("position") or "").upper() == pos:
@@ -225,7 +228,7 @@ async def get_streaming_options(
         strength_season: Season for the rankings prior (default auto: target
             season, else prior season before live data exists).
         top_n: Max options returned per position (default 8; 0 = all teams).
-        league_id: Sleeper league id — when given, each option is annotated with
+        league_id: ESPN league id — when given, each option is annotated with
             free-agent availability (clean for DST; K/QB/TE/RB/WR list the team's
             players at that position from the athletes cache).
         only_available: with league_id, keep only options that have a free-agent

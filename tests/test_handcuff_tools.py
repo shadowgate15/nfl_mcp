@@ -44,12 +44,12 @@ class TestHandcuffFromDepth:
 
 class TestAvailability:
     def test_free_agent(self):
-        assert _availability("x", {}, my_roster_id=1) == "free_agent"
-        assert _availability(None, {"x": 1}, my_roster_id=1) == "free_agent"
+        assert _availability("x", {}, my_team_id=1) == "free_agent"
+        assert _availability(None, {"x": 1}, my_team_id=1) == "free_agent"
 
     def test_yours_vs_opponent(self):
-        assert _availability("x", {"x": 1}, my_roster_id=1) == "yours"
-        assert _availability("x", {"x": 2}, my_roster_id=1) == "rostered_by_opponent"
+        assert _availability("x", {"x": 1}, my_team_id=1) == "yours"
+        assert _availability("x", {"x": 2}, my_team_id=1) == "rostered_by_opponent"
 
 
 class _DB:
@@ -61,6 +61,14 @@ class _DB:
 
     def get_athletes_by_team(self, team):
         return self._by_team.get(team, [])
+
+
+def _entry(player_id, lineup_slot_id=0, nested="player"):
+    """One raw ESPN roster entry, using either player-nesting shape."""
+    player = {"id": player_id, "fullName": f"Player {player_id}", "defaultPositionId": 2}
+    if nested == "player":
+        return {"player": player, "lineupSlotId": lineup_slot_id}
+    return {"playerPoolEntry": {"player": player}, "lineupSlotId": lineup_slot_id}
 
 
 class TestGetHandcuffMap:
@@ -77,20 +85,24 @@ class TestGetHandcuffMap:
         )
 
     def _rosters(self, hc_owner=None):
-        rosters = [
-            {"roster_id": 1, "players": ["rb_star", "wr1"]},
-            {"roster_id": 2, "players": ["some_other"]},
+        teams = [
+            {"id": 1, "roster": {"entries": [
+                _entry("rb_star", nested="player"),
+                _entry("wr1", nested="playerPoolEntry"),
+            ]}},
+            {"id": 2, "roster": {"entries": [_entry("some_other")]}},
         ]
         if hc_owner:
-            next(r for r in rosters if r["roster_id"] == hc_owner)["players"].append("hc1")
-        return {"rosters": rosters, "success": True}
+            next(t for t in teams if t["id"] == hc_owner)["roster"]["entries"].append(_entry("hc1"))
+        return {"rosters": teams, "success": True}
 
     async def _run(self, hc_owner=None):
         # Real ESPN shape: row keyed by the starter, backups follow (with a tag).
         depth = {"depth_chart": [{"position": "Star Back", "players": ["Handcuff BackO", "-"]}]}
-        with patch("nfl_mcp.sleeper_tools.get_rosters", new=AsyncMock(return_value=self._rosters(hc_owner))), \
+        with patch("nfl_mcp.espn_fantasy_tools.get_espn_rosters",
+                   new=AsyncMock(return_value=self._rosters(hc_owner))), \
              patch("nfl_mcp.nfl_tools.get_depth_chart", new=AsyncMock(return_value=depth)):
-            return await get_handcuff_map("123", roster_id=1, db=self._db())
+            return await get_handcuff_map("123", team_id=1, db=self._db())
 
     @pytest.mark.asyncio
     async def test_free_agent_handcuff_is_priority(self):
@@ -111,14 +123,14 @@ class TestGetHandcuffMap:
 
     @pytest.mark.asyncio
     async def test_roster_not_found(self):
-        with patch("nfl_mcp.sleeper_tools.get_rosters",
-                   new=AsyncMock(return_value={"rosters": [{"roster_id": 9, "players": []}]})):
-            res = await get_handcuff_map("123", roster_id=1, db=self._db())
+        with patch("nfl_mcp.espn_fantasy_tools.get_espn_rosters",
+                   new=AsyncMock(return_value={"rosters": [{"id": 9, "roster": {"entries": []}}]})):
+            res = await get_handcuff_map("123", team_id=1, db=self._db())
         assert res["success"] is False
         assert "not found" in res["error"]
 
     @pytest.mark.asyncio
     async def test_db_required(self):
-        res = await get_handcuff_map("123", roster_id=1, db=None)
+        res = await get_handcuff_map("123", team_id=1, db=None)
         assert res["success"] is False
         assert "database" in res["error"]
