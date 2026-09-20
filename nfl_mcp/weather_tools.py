@@ -215,7 +215,7 @@ async def get_weather_forecast(
     Returns a dict with a `games` list, each carrying home/away, stadium, dome,
     wind/precip/temp and an `impact` block, plus a `severity`-sorted order.
     """
-    from . import sleeper_tools
+    from . import nfl_enrichment
 
     default_data = {"season": season, "week": week, "games": []}
     if not isinstance(week, int) or not (1 <= week <= 18):
@@ -223,7 +223,7 @@ async def get_weather_forecast(
 
     teams_filter = {t.upper() for t in teams} if teams else None
 
-    rows = await sleeper_tools._fetch_week_schedule(season, week, force=True)
+    rows = await nfl_enrichment._fetch_week_schedule(season, week, force=True)
     if not rows:
         return handle_validation_error(
             f"No schedule available for season {season}, week {week}", default_data
