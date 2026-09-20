@@ -1,6 +1,6 @@
 """Tests for the draft assistant (draft_tools.py).
 
-Values and Sleeper draft calls are patched so tests are deterministic/offline.
+Values and ESPN draft calls are patched so tests are deterministic/offline.
 """
 
 import tempfile
@@ -96,32 +96,118 @@ class TestDraftBoard:
         pv._service = None
 
 
+class TestEspnSettingsAdapters:
+    def test_espn_settings_to_sleeper_shape(self):
+        espn_settings = {
+            "size": 10,
+            "rosterSettings": {"lineupSlotCounts": {
+                "0": 1, "2": 2, "4": 2, "6": 1, "23": 1, "7": 0,
+            }},
+        }
+        shape = dt._espn_settings_to_sleeper_shape(espn_settings)
+        assert shape == {
+            "teams": 10, "slots_qb": 1, "slots_rb": 2, "slots_wr": 2, "slots_te": 1,
+            "slots_flex": 1, "slots_rb_wr": 0, "slots_wr_te": 0, "slots_super_flex": 0,
+        }
+
+    def test_espn_settings_to_sleeper_shape_superflex(self):
+        espn_settings = {"size": 12, "rosterSettings": {"lineupSlotCounts": {"0": 1, "7": 1}}}
+        shape = dt._espn_settings_to_sleeper_shape(espn_settings)
+        assert shape["slots_super_flex"] == 1
+
+    def test_espn_settings_to_sleeper_shape_handles_missing_rosterSettings(self):
+        assert dt._espn_settings_to_sleeper_shape({})["teams"] == 12
+
+    def test_ppr_from_espn_settings_reads_statid_53(self):
+        assert dt._ppr_from_espn_settings(
+            {"scoringSettings": {"scoringItems": [{"statId": 53, "points": 1.0}]}}
+        ) == 1.0
+        assert dt._ppr_from_espn_settings(
+            {"scoringSettings": {"scoringItems": [{"statId": 53, "points": 0.5}]}}
+        ) == 0.5
+        assert dt._ppr_from_espn_settings(
+            {"scoringSettings": {"scoringItems": [{"statId": 53, "points": 0}]}}
+        ) == 0.0
+
+    def test_ppr_from_espn_settings_falls_back_to_full_ppr(self):
+        # statId 53 absent entirely -> full PPR, per ADR 0007's convention.
+        assert dt._ppr_from_espn_settings({"scoringSettings": {"scoringItems": []}}) == 1.0
+        assert dt._ppr_from_espn_settings({}) == 1.0
+
+    def test_scoring_label_from_ppr(self):
+        assert dt._scoring_label_from_ppr(1.0) == "ppr"
+        assert dt._scoring_label_from_ppr(0.5) == "half-ppr"
+        assert dt._scoring_label_from_ppr(0.0) == "standard"
+
+
+class TestEspnPickAdapter:
+    """The ESPN draftDetail.picks[] -> Sleeper-shaped pick dict adapter."""
+
+    def test_adapts_using_player_cache(self):
+        pick = {"playerId": 100, "roundId": 2, "teamId": 5, "overallPickNumber": 17}
+        cache = {"100": {"full_name": "Cache Player", "position": "wr"}}
+        out = dt._espn_pick_to_sleeper_pick(pick, cache, {})
+        assert out == {
+            "player_id": "100",
+            "round": 2,
+            "draft_slot": 5,
+            "metadata": {"first_name": "Cache", "last_name": "Player", "position": "WR"},
+        }
+
+    def test_falls_back_to_fantasycalc_values_when_uncached(self):
+        pick = {"playerId": 200, "roundId": 1, "teamId": 3}
+        values_by_id = {"200": {"name": "Value Player", "position": "RB"}}
+        out = dt._espn_pick_to_sleeper_pick(pick, {}, values_by_id)
+        assert out["player_id"] == "200"
+        assert out["metadata"] == {"first_name": "Value", "last_name": "Player", "position": "RB"}
+
+    def test_player_cache_takes_priority_over_values(self):
+        pick = {"playerId": 300, "roundId": 1, "teamId": 1}
+        cache = {"300": {"full_name": "Cached Name", "position": "TE"}}
+        values_by_id = {"300": {"name": "Stale Value Name", "position": "WR"}}
+        out = dt._espn_pick_to_sleeper_pick(pick, cache, values_by_id)
+        assert out["metadata"]["first_name"] == "Cached"
+        assert out["metadata"]["position"] == "TE"
+
+    def test_missing_player_id_yields_no_id_and_blank_metadata(self):
+        out = dt._espn_pick_to_sleeper_pick({"roundId": 1, "teamId": 1}, {}, {})
+        assert out["player_id"] is None
+        assert out["metadata"] == {"first_name": "", "last_name": "", "position": ""}
+
+
 class TestRecommendPick:
-    DRAFT = {
+    LEAGUE = {
         "success": True,
-        "draft": {
-            "draft_id": "d1", "type": "snake", "status": "drafting",
-            "settings": {"teams": 12, "rounds": 15, "slots_qb": 1, "slots_rb": 2,
-                         "slots_wr": 2, "slots_te": 1, "slots_flex": 1, "slots_bn": 7},
-            "metadata": {"scoring_type": "ppr"},
+        "league": {
+            "settings": {
+                "size": 12,
+                "rosterSettings": {"lineupSlotCounts": {
+                    "0": 1, "2": 2, "4": 2, "6": 1, "23": 1,
+                }},
+                "scoringSettings": {"scoringItems": [{"statId": 53, "points": 1.0}]},
+                "draftSettings": {"keeperCount": 0},
+            },
         },
     }
 
-    def _picks(self, picks):
-        return {"success": True, "picks": picks}
+    def _draft(self, picks):
+        return {
+            "success": True,
+            "draft": {"draftDetail": {"drafted": True, "inProgress": False, "picks": picks}},
+        }
 
     async def test_recommend_weights_by_roster_need(self):
         db = _temp_db()
         svc = _service_with_pool(db)
-        # My slot=3 already has 2 RBs -> RB starters filled, should prefer WR/QB/TE.
+        # My team=3 already has 2 RBs -> RB starters filled, should prefer WR/QB/TE.
         picks = [
-            {"player_id": "1", "draft_slot": 3, "round": 1, "metadata": {"position": "RB", "first_name": "RB", "last_name": "One"}},
-            {"player_id": "2", "draft_slot": 3, "round": 2, "metadata": {"position": "RB", "first_name": "RB", "last_name": "Two"}},
+            {"playerId": 1, "roundId": 1, "teamId": 3, "overallPickNumber": 1},
+            {"playerId": 2, "roundId": 2, "teamId": 3, "overallPickNumber": 2},
         ]
         with patch.object(svc, "_fetch_from_fantasycalc", return_value=list(POOL)), \
-             patch.object(dt, "get_draft", return_value=self.DRAFT), \
-             patch.object(dt, "get_draft_picks", return_value=self._picks(picks)):
-            res = await dt.recommend_draft_pick("d1", my_slot=3, num_suggestions=3, db=db)
+             patch.object(dt, "get_espn_draft", return_value=self._draft(picks)), \
+             patch.object(dt, "get_espn_league", return_value=self.LEAGUE):
+            res = await dt.recommend_draft_pick("1234", my_slot=3, num_suggestions=3, db=db)
         assert res["success"] is True
         assert res["picks_made"] == 2
         # drafted RBs must not be suggested
@@ -136,18 +222,40 @@ class TestRecommendPick:
         db = _temp_db()
         svc = _service_with_pool(db)
         with patch.object(svc, "_fetch_from_fantasycalc", return_value=list(POOL)), \
-             patch.object(dt, "get_draft", return_value=self.DRAFT), \
-             patch.object(dt, "get_draft_picks", return_value=self._picks([])):
-            res = await dt.recommend_draft_pick("d1", my_slot=None, num_suggestions=3, db=db)
+             patch.object(dt, "get_espn_draft", return_value=self._draft([])), \
+             patch.object(dt, "get_espn_league", return_value=self.LEAGUE):
+            res = await dt.recommend_draft_pick("1234", my_slot=None, num_suggestions=3, db=db)
         assert res["success"] is True
         assert res["my_roster"] is None
         # highest-VBD player leads
         assert res["top_pick"]["vbd"] == max(s["vbd"] for s in res["suggestions"])
         pv._service = None
 
-    async def test_recommend_requires_draft_id(self):
+    async def test_recommend_requires_league_id(self):
         res = await dt.recommend_draft_pick("", db=_temp_db())
         assert res["success"] is False
+
+    async def test_recommend_surfaces_draft_load_error(self):
+        db = _temp_db()
+        svc = _service_with_pool(db)
+        failed_draft = {"success": False, "draft": None, "error": "boom"}
+        with patch.object(svc, "_fetch_from_fantasycalc", return_value=list(POOL)), \
+             patch.object(dt, "get_espn_draft", return_value=failed_draft), \
+             patch.object(dt, "get_espn_league", return_value=self.LEAGUE):
+            res = await dt.recommend_draft_pick("1234", db=db)
+        assert res["success"] is False
+        pv._service = None
+
+    async def test_recommend_surfaces_league_settings_load_error(self):
+        db = _temp_db()
+        svc = _service_with_pool(db)
+        failed_league = {"success": False, "league": None, "error": "boom"}
+        with patch.object(svc, "_fetch_from_fantasycalc", return_value=list(POOL)), \
+             patch.object(dt, "get_espn_draft", return_value=self._draft([])), \
+             patch.object(dt, "get_espn_league", return_value=failed_league):
+            res = await dt.recommend_draft_pick("1234", db=db)
+        assert res["success"] is False
+        pv._service = None
 
 
 # A larger pool so a full mock draft can fill starters + bench for all teams

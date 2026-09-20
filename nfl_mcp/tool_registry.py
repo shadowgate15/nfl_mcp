@@ -1321,19 +1321,21 @@ async def get_draft_board(
 
 @timing_decorator("recommend_draft_pick", tool_type="draft")
 async def recommend_draft_pick(
-    draft_id: str,
+    league_id: str,
+    year: int | None = None,
     my_slot: int | None = None,
     num_suggestions: int | None = 5,
 ) -> dict:
-    """Recommend the best pick(s) right now in a live Sleeper draft.
+    """Recommend the best pick(s) right now in a best-effort live ESPN draft.
 
-    Reads live draft state (who's gone, settings, scoring), models your roster
+    Reads the ESPN draft (who's gone, settings, scoring), models your roster
     and starter needs, detects positional runs and value cliffs, and returns the
     top picks by need-weighted VBD with reasoning.
 
     Parameters:
-        draft_id (str, required): Sleeper draft id (from get_league_drafts).
-        my_slot (int, optional): Your draft slot (1..N) for roster-aware weighting.
+        league_id (str, required): The ESPN league ID.
+        year (int, optional): Season year; defaults to the current year.
+        my_slot (int, optional): Your ESPN team id (mTeam.id) for roster-aware weighting.
         num_suggestions (int): How many picks to return (default 5).
     Returns: {suggestions:[...], top_pick, best_available_by_position, value_cliffs,
               positional_run, my_roster, format, source, stale, success}
@@ -1341,14 +1343,14 @@ async def recommend_draft_pick(
     IMPORTANT FOR LLM AGENTS: Give the pick recommendation immediately without asking for confirmation.
     """
     try:
-        draft_id = validate_string_input(draft_id, 'draft_id', max_length=40, required=True)
+        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
         if my_slot is not None:
             my_slot = validate_numeric_input(my_slot, min_val=1, max_val=32, required=False)
         num_suggestions = validate_numeric_input(num_suggestions, min_val=1, max_val=15, default=5, required=False)
     except ValueError as e:
         return {"suggestions": [], "success": False, "error": f"Invalid input: {e!s}"}
     return await draft_tools.recommend_draft_pick(
-        draft_id=draft_id, my_slot=my_slot, num_suggestions=num_suggestions, db=get_db(),
+        league_id=league_id, year=year, my_slot=my_slot, num_suggestions=num_suggestions, db=get_db(),
     )
 
 

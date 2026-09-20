@@ -1,7 +1,9 @@
 # Draft-Day Playbook
 
 How to actually draft with this server — before, during, and how to read what it
-tells you. Distilled from a full live run against a real Sleeper draft.
+tells you. Distilled from a full live run against a real Sleeper draft (the
+worked example in §5 predates the ESPN cutover; the commands throughout are
+current).
 
 > TL;DR: **rounds 1–8, follow the tool** (value / VBD, cliffs, runs, "elite scarce
 > position early or wait on QB"). **Bench rounds, your judgment takes over**
@@ -14,7 +16,7 @@ tells you. Distilled from a full live run against a real Sleeper draft.
 ```bash
 # (a) Flight check — validate the whole flow against your real league, so nothing
 #     surprises you on the clock.
-python -m evals.live.validate_draft --username your_sleeper_name --season 2026
+python -m evals.live.validate_draft --league-id <league_id> --year 2026
 
 # (b) Study the board — VBD-ranked, tiered, format-aware.
 #     (via your assistant / MCP client)
@@ -24,31 +26,32 @@ get_draft_board(scoring="ppr", num_teams=12)
 simulate_draft(my_slot=7, num_teams=12, num_sims=100)
 ```
 
-Get a **live `draft_id`** to practise against: start a **Sleeper mock draft**
-(app/website, solo-with-CPU works year-round). The id is in the URL:
-`sleeper.com/draft/nfl/<draft_id>`. Note your **slot** (draft position).
+Get a **live ESPN `league_id`** to practise against: create an **ESPN mock draft
+lobby** or use a real league. The id is in the URL:
+`fantasy.espn.com/football/league?leagueId=<league_id>`. Note your **team id**
+(`mTeam.id` — your draft slot).
 
 ---
 
 ## 2. During the draft
 
-Two ways — both read the **live** Sleeper draft state:
+Two ways — both read the **best-effort live** ESPN draft state:
 
 **A) Ask your assistant, each pick** (nothing to run):
-> *"I'm in draft `<draft_id>` at slot 4 — who should I take now?"*
-> → calls `recommend_draft_pick(draft_id, my_slot)`.
+> *"I'm drafting in ESPN league `<league_id>`, my team id is 4 — who should I take now?"*
+> → calls `recommend_draft_pick(league_id, my_slot)`.
 
 **B) Live watcher** (a terminal "war room"):
 ```bash
-python -m evals.live.draft_watch --draft-id <draft_id> --my-slot 4
+python -m evals.live.draft_watch --league-id <league_id> --my-slot 4
 ```
 It polls the draft and, each time you're on the clock, prints your roster, what's
 gone since your last pick, the top picks (with value cliffs & positional runs),
 and — once your starters are full — flips to a **bench-depth overlay**. Make your
-pick in Sleeper; it watches for your next turn. `--once` for a single check.
+pick in ESPN; it watches for your next turn. `--once` for a single check.
 
-> **Sleeper API lag:** picks can take a second or two to appear in the API. If the
-> tool seems a beat behind, re-run — `recommend_draft_pick` always re-fetches.
+> **API lag:** picks can take a second or two to appear in the API. If the tool
+> seems a beat behind, re-run — `recommend_draft_pick` always re-fetches.
 
 ---
 

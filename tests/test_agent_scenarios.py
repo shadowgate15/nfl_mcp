@@ -50,5 +50,5 @@ def test_scenario_args_are_real_params():
 def test_required_params_detected():
     defs = {d["name"]: d for d in T.anthropic_tools_from_registry()}
     # sanity: a tool with a required-first-arg is captured
-    assert "draft_id" in defs["recommend_draft_pick"]["input_schema"]["required"]
+    assert "league_id" in defs["recommend_draft_pick"]["input_schema"]["required"]
     assert "league_id" in defs["get_playoff_odds"]["input_schema"]["required"]

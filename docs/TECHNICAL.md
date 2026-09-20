@@ -116,12 +116,11 @@ read the `league_id` from the app URL `sleeper.com/leagues/<league_id>/...`.
 ### Live draft CLIs (`evals.live`)
 
 ```bash
-# Pre-draft flight check against your real league/draft
-python -m evals.live.validate_draft --username your_sleeper_name --season 2026
-#   ...or --league-id <id> / --draft-id <id>
+# Pre-draft flight check against your real ESPN league
+python -m evals.live.validate_draft --league-id <league_id> --year 2026
 
 # Live "war room" — recommends a pick each time you're on the clock
-python -m evals.live.draft_watch --draft-id <draft_id> --my-slot 4
+python -m evals.live.draft_watch --league-id <league_id> --my-slot 4
 ```
 
 ## Configuration

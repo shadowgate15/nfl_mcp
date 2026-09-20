@@ -10,9 +10,9 @@ SCENARIOS = [
     # --- Drafting -----------------------------------------------------------
     {
         "id": "draft_pick_live",
-        "prompt": "I'm in Sleeper draft 998877 at draft slot 7 and I'm on the clock. Who should I take right now?",
+        "prompt": "I'm drafting in ESPN league 998877 and I'm on the clock, my team id is 7. Who should I take right now?",
         "expect": ["recommend_draft_pick"],
-        "args": {"draft_id": "998877", "my_slot": 7},
+        "args": {"league_id": "998877", "my_slot": 7},
     },
     {
         "id": "draft_board",
