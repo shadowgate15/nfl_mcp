@@ -24,7 +24,7 @@ The NFL MCP Server follows a simplified, maintainable architecture:
 
 1. **Tool Registry** (`tool_registry.py`): Central registration of all MCP tools
 2. **NFL Tools** (`nfl_tools.py`): ESPN API integration for NFL data
-3. **Sleeper Tools** (`sleeper_tools.py`): Fantasy league management via Sleeper API
+3. **ESPN Fantasy Tools** (`espn_fantasy_tools.py`): League/roster/draft/transactions via ESPN Fantasy (needs `ESPN_S2`/`ESPN_SWID` session cookies)
 4. **Athlete Tools** (`athlete_tools.py`): Player data management and caching
 5. **Web Tools** (`web_tools.py`): URL crawling and content extraction
 6. **Waiver Tools** (`waiver_tools.py`): Advanced waiver wire analysis
@@ -32,7 +32,7 @@ The NFL MCP Server follows a simplified, maintainable architecture:
 
 ## Tool Categories
 
-The server provides **30+ MCP tools** organized into logical categories:
+The server provides **60+ MCP tools** organized into logical categories:
 
 ### 1. NFL Information Tools (9 tools)
 
@@ -110,7 +110,7 @@ Coaching staff information, coaching trees, and scheme analysis:
 
 ### 3. Player/Athlete Tools (4 tools)
 
-Player data management with Sleeper API integration:
+Player data management, sourced from ESPN's pro-player pool:
 
 - **`fetch_athletes`**: Import all NFL players (expensive operation)
   - Parameters: None
@@ -132,7 +132,7 @@ Player data management with Sleeper API integration:
   - Use case: Analyze team composition
   - Returns: All athletes on specified team
 
-### 3. Web Scraping Tools (1 tool)
+### 4. Web Scraping Tools (1 tool)
 
 Generic URL content extraction:
 
@@ -142,88 +142,102 @@ Generic URL content extraction:
   - Returns: Cleaned text content optimized for LLM consumption
   - Security: Validates URLs, removes scripts, sanitizes content
 
-### 4. Fantasy League Tools - Sleeper API (18 tools)
+### 5. ESPN Fantasy League Tools (10 tools)
 
-Comprehensive fantasy football league management:
+Your live ESPN Fantasy league — settings, rosters, draft, transactions. Every tool
+here needs `ESPN_S2`/`ESPN_SWID` session cookies (see `docs/TECHNICAL.md`); there is
+no username-based lookup like Sleeper's — ESPN requires a real login even for public
+leagues.
 
-#### Core League Tools
-- **`get_league`**: League information and settings
-- **`get_rosters`**: All team rosters with player enrichment
-- **`get_league_users`**: League members/managers
-- **`get_user`**: Individual user profile
-- **`get_user_leagues`**: All leagues for a user
+- **`get_espn_league`**: League settings and metadata
+  - Parameters: `league_id` (required), `year` (optional, defaults to current year)
+  - Returns: `{league, success, error?, error_type?}`
 
-#### Matchup & Competition Tools
-- **`get_matchups`**: Weekly matchups with enriched player data
-- **`get_playoff_bracket`**: Playoff bracket (supports winners/losers)
-- **`get_fantasy_context`**: Aggregated league data in one call
+- **`get_espn_players`**: A page of the ESPN pro-player pool for a season, unscoped to any league
+  - Parameters: `year` (optional), `limit` (optional, default 25, range 1-100), `offset` (optional, default 0)
+  - Returns: `{players: [...], total_players, has_more, success, error?, error_type?}`
 
-#### Transaction & Activity Tools
-- **`get_transactions`**: League transactions by week
-- **`get_traded_picks`**: Draft pick trades
+- **`get_espn_free_agents`**: A page of free-agent/waiver-available players for a league
+  - Parameters: `league_id` (required), `week` (optional), `year` (optional), `limit` (optional, default 25, range 1-100), `offset` (optional, default 0)
+  - Returns: `{players: [...], total_free_agents, has_more, success, error?, error_type?}`
 
-#### Draft Tools
-- **`get_league_drafts`**: All drafts for a league
-- **`get_draft`**: Specific draft information
-- **`get_draft_picks`**: All picks in a draft
-- **`get_draft_traded_picks`**: Traded draft picks
+- **`get_espn_rosters`**: Every team's roster
+  - Parameters: `league_id` (required), `week` (optional, defaults to current roster), `year` (optional), `detail` (optional, `"summary"` default or `"full"` — `"summary"` trims each roster entry to a field allowlist)
+  - Returns: `{rosters: [...], success, error?, error_type?}`
 
-#### Global NFL & Trends
-- **`get_nfl_state`**: Current NFL week and season state
-- **`get_trending_players`**: Players trending in add/drop activity
-- **`fetch_all_players`**: Complete player dataset (cached)
+- **`get_espn_standings`**: League standings
+  - Parameters: `league_id` (required), `year` (optional)
+  - Returns: `{standings: [...], success, error?, error_type?}`
 
-### 5. Strategic Planning Tools (4 tools)
+- **`get_espn_scoreboard`**: Final scores for the league's matchups
+  - Parameters: `league_id` (required), `week` (optional; omit for a capped window of recent weeks — see `total_weeks`/`has_more`), `year` (optional)
+  - Returns: `{scoreboard: [...], total_weeks, has_more, success, error?, error_type?}`
 
-Advanced multi-week fantasy football planning:
+- **`get_espn_matchups`**: Full box-score/lineup detail for the league's matchups
+  - Parameters: `league_id` (required), `week` (optional; same capping as `get_espn_scoreboard`), `year` (optional), `detail` (optional, `"summary"` default or `"full"`)
+  - Returns: `{matchups: [...], total_weeks, has_more, success, error?, error_type?}`
 
-- **`get_strategic_matchup_preview`**: Multi-week matchup analysis
-  - Parameters: `league_id`, `current_week`, `weeks_ahead` (optional, default 4)
-  - Use case: Plan 4-8 weeks ahead for bye weeks and trades
-  - Returns: Strategic analysis with opportunity windows
+- **`get_espn_draft`**: Draft results
+  - Parameters: `league_id` (required), `year` (optional)
+  - Returns: `{draft, success, error?, error_type?}`
 
-- **`get_season_bye_week_coordination`**: Season-long bye week planning
-  - Parameters: `league_id`, `season` (optional)
-  - Use case: Coordinate roster around NFL bye week calendar
-  - Returns: Bye week calendar with strategic recommendations
+- **`get_espn_transactions`**: Transaction/waiver activity log
+  - Parameters: `league_id` (required), `week` (optional), `types` (optional, e.g. `["WAIVER", "TRADE"]`), `year` (optional)
+  - Returns: `{transactions: [...], total_transactions, success, error?, error_type?}`
 
-- **`get_trade_deadline_analysis`**: Trade deadline timing strategy
-  - Parameters: `league_id`, `current_week`
-  - Use case: Optimize trade timing before deadline
-  - Returns: Timing windows and urgency analysis
+- **`get_espn_player_news`**: Latest ESPN fantasy player news, optionally filtered to one player
+  - Parameters: `player_id` (optional), `limit` (optional)
+  - Returns: `{news: [...], total_news, success, error?}`
 
-- **`get_playoff_preparation_plan`**: Comprehensive playoff preparation
-  - Parameters: `league_id`, `current_week`
-  - Use case: Prepare roster for fantasy playoffs
-  - Returns: Preparation plan with readiness score (0-100)
+### 6. Draft Assistant Tools (3 tools)
 
-### 6. Waiver Wire Analysis Tools (3 tools)
+VBD-tiered draft board plus a best-effort live pick recommender for a real ESPN draft.
+There is no standalone Sleeper-style `draft_id` — a draft is addressed by `league_id` + `year`.
 
-Advanced waiver wire intelligence:
+- **`get_draft_board`**: VBD-ranked draft board (offline, not league-scoped)
+- **`recommend_draft_pick`**: Best pick(s) right now in a live ESPN draft
+  - Parameters: `league_id` (required), `year` (optional), `my_slot` (optional — your ESPN team id, `mTeam.id`), `num_suggestions` (optional, default 5)
+  - Returns: `{suggestions, top_pick, best_available_by_position, value_cliffs, positional_run, my_roster, format, source, stale, success}`
+- **`simulate_draft`**: Offline mock draft from a given slot
+
+### 7. Waiver Wire & FAAB Tools (5 tools)
+
+Waiver intelligence and handcuff mapping, all sourced from `get_espn_transactions`/`get_espn_rosters`.
 
 - **`get_waiver_log`**: Waiver transactions with de-duplication
-  - Parameters: `league_id`, `week` (optional), `year` (optional), `dedupe` (optional, default true)
-  - Use case: Track waiver activity and identify patterns
-  - Returns: Transaction log with duplicate detection
+  - Parameters: `league_id` (required), `week` (optional), `year` (optional), `dedupe` (optional, default true)
 
 - **`check_re_entry_status`**: Players dropped then re-added
-  - Parameters: `league_id`, `week` (optional), `year` (optional)
-  - Use case: Identify volatile players and waiver patterns
-  - Returns: Re-entry analysis with volatile player list
+  - Parameters: `league_id` (required), `week` (optional), `year` (optional)
 
-- **`get_waiver_wire_dashboard`**: Comprehensive waiver analytics
-  - Parameters: `league_id`, `week` (optional), `year` (optional)
-  - Use case: Complete waiver wire intelligence in one call
-  - Returns: Combined analysis from waiver log and re-entry tools
+- **`get_waiver_wire_dashboard`**: Combined waiver log + re-entry analysis
+  - Parameters: `league_id` (required), `week` (optional), `year` (optional)
 
-### 7. Trade Analysis Tools (1 tool)
+- **`recommend_faab_bid`**: Recommend a FAAB bid (% of budget + absolute) for a player
+  - Parameters: `league_id` (required), `player_id` (optional, preferred), `player_name` (optional fallback), `team_id` (optional, your ESPN team id for roster-need weighting)
+  - Returns: `{recommendation: {bid_pct, bid_absolute, tier, range, reasoning, breakdown}, success}`
+  - Note: ESPN has no trending-adds signal (unlike Sleeper), so league demand is frozen at neutral (`demand_label: "unavailable"`) rather than fabricated.
 
-Trade evaluation and optimization:
+- **`get_handcuff_map`**: Map each RB starter to its handcuff + the handcuff's availability
+  - Parameters: `league_id` (required), `team_id` (required, your ESPN team id)
+  - Returns: `{handcuffs: [{starter, team, handcuff, handcuff_status, handcuff_player_id, match}], priority_free_agents, count, success, error?}`
 
-- **`analyze_trade`**: Evaluate potential trades
-  - Parameters: Trade-specific parameters
-  - Use case: Assess trade fairness and value
-  - Returns: Trade analysis with recommendations
+### 8. Trade & Opponent Analysis Tools (2 tools)
+
+- **`analyze_trade`**: Evaluate a proposed trade for fairness and fit
+  - Parameters: `league_id` (required), `team1_id` (required, ESPN team id), `team2_id` (required), `team1_gives` (required, list of ESPN player IDs), `team2_gives` (required, list of ESPN player IDs)
+  - Returns: `{recommendation, fairness_score, team1_analysis, team2_analysis, trade_details, warnings, success, error?}`
+  - Example: `analyze_trade(league_id="12345", team1_id=1, team2_id=2, team1_gives=["4034", "4035"], team2_gives=["4036"])`
+
+- **`analyze_opponent`**: Identify an opponent's roster weaknesses and exploitation opportunities
+  - Parameters: `league_id` (required), `opponent_team_id` (required, ESPN team id of the opponent), `current_week` (optional)
+  - Returns: `{vulnerability_score, vulnerability_level, position_assessments, starter_weaknesses, exploitation_strategies, matchup_context?, opponent_name, success, error?}`
+
+### 9. Season Strategy Tools (1 tool)
+
+- **`get_playoff_odds`**: Monte-Carlo playoff probability simulation for the rest of the season
+  - Parameters: `league_id` (required), `current_week` (optional, defaults to current NFL week), `num_sims` (optional, default 10000), `score_sd` (optional, default 25.0), `team_id` (optional, ESPN team id — also returns your win/lose-this-week swing), `seed` (optional, for reproducibility)
+  - Returns: `{odds: [{team_id, name, record, mean_ppg, playoff_pct, avg_seed}], this_week_swing?, playoff_teams, current_week, success}`
 
 ## Advanced Features
 
@@ -384,12 +398,10 @@ The server implements comprehensive security measures:
 
 ### Tool Selection Guidelines
 
-1. **Start with NFL State**: Call `get_nfl_state` to determine current week/season
-2. **Use Aggregators**: `get_fantasy_context` reduces API calls for common data
-3. **Cache Awareness**: `fetch_teams` and `fetch_athletes` are expensive; call once
-4. **Enrichment Trade-offs**: Advanced enrichment provides better insights but uses more resources
-5. **Strategic Tools**: Use strategic planning tools for multi-week analysis
-6. **Waiver Intelligence**: Combine `get_waiver_log` and `check_re_entry_status` for comprehensive analysis
+1. **No separate "current week" call needed**: league-scoped tools (`get_espn_scoreboard`, `get_espn_matchups`, `get_playoff_odds`, `recommend_draft_pick`, waiver tools, …) resolve the current NFL/scoring period internally when `week`/`year` is omitted — there's no standalone state tool to call first.
+2. **Cache Awareness**: `fetch_teams` and `fetch_athletes` are expensive; call once
+3. **Enrichment Trade-offs**: Advanced enrichment provides better insights but uses more resources
+4. **Waiver Intelligence**: Combine `get_waiver_log` and `check_re_entry_status` for comprehensive analysis
 
 ### Performance Optimization
 
@@ -410,31 +422,29 @@ The server implements comprehensive security measures:
 ### Workflow Patterns
 
 #### Start/Sit Decision Workflow
-1. `get_nfl_state` → Get current week
-2. `get_team_injuries` → Check injury status
-3. `get_matchups` → See weekly matchup (with enrichment)
-4. `get_team_schedule` → Analyze opponent difficulty
-5. Evaluate based on snap%, usage trends, practice status
+1. `get_team_injuries` → Check injury status
+2. `get_espn_matchups` → See weekly box-score matchup (with enrichment)
+3. `get_team_schedule` → Analyze opponent difficulty
+4. Evaluate based on snap%, usage trends, practice status
 
 #### Waiver Wire Research Workflow
-1. `get_trending_players` → Identify popular adds/drops
+1. `get_espn_free_agents` → See who's available in your league
 2. `get_waiver_log` → Check league-specific activity
 3. `check_re_entry_status` → Identify volatile players
 4. `search_athletes` → Get detailed player info
 5. `get_team_player_stats` → Verify fantasy relevance
 
 #### Trade Evaluation Workflow
-1. `get_rosters` → Understand team compositions
-2. `get_matchups` → See current matchup context
-3. `get_season_bye_week_coordination` → Check bye week impact
-4. `analyze_trade` → Evaluate trade proposal
-5. `get_strategic_matchup_preview` → Consider future schedule
+1. `get_espn_rosters` → Understand team compositions
+2. `get_espn_matchups` → See current matchup context
+3. `analyze_trade` → Evaluate trade proposal
+4. `analyze_opponent` → Check the other side's weaknesses post-trade
 
 #### Playoff Preparation Workflow
-1. `get_playoff_preparation_plan` → Get comprehensive plan
-2. `get_strategic_matchup_preview` → Analyze playoff weeks
-3. `get_trade_deadline_analysis` → Time final moves
-4. `get_waiver_wire_dashboard` → Monitor waiver opportunities
+1. `get_playoff_odds` → Monte-Carlo playoff probabilities for the rest of the season
+2. `get_playoff_sos` → Strength of schedule for weeks 15-17
+3. `get_waiver_wire_dashboard` → Monitor waiver opportunities
+4. `get_handcuff_map` → Secure handcuffs before the stretch run
 
 ## Response Format
 
@@ -489,26 +499,20 @@ All tools return consistent response structures:
 from fastmcp import Client
 
 async with Client("http://localhost:9000/mcp/") as client:
-    # Get current NFL state
-    nfl_state = await client.call_tool("get_nfl_state", {})
-    current_week = nfl_state.data["nfl_state"]["week"]
-    
-    # Get league matchups with enrichment
-    matchups = await client.call_tool("get_matchups", {
-        "league_id": "123456789",
-        "week": current_week
+    # Get league matchups with enrichment (week omitted -> current scoring period)
+    matchups = await client.call_tool("get_espn_matchups", {
+        "league_id": "123456789"
     })
-    
+
     # Analyze waiver activity
     waiver_dashboard = await client.call_tool("get_waiver_wire_dashboard", {
         "league_id": "123456789"
     })
-    
-    # Get strategic preview
-    preview = await client.call_tool("get_strategic_matchup_preview", {
+
+    # Monte-Carlo playoff odds for the rest of the season
+    odds = await client.call_tool("get_playoff_odds", {
         "league_id": "123456789",
-        "current_week": current_week,
-        "weeks_ahead": 6
+        "team_id": 4
     })
 ```
 
@@ -523,17 +527,16 @@ async with Client("http://localhost:9000/mcp/") as client:
 
 - **Repository**: https://github.com/gtonic/nfl_mcp
 - **FastMCP Documentation**: https://github.com/jlowin/fastmcp
-- **Sleeper API**: https://docs.sleeper.com/
-- **ESPN API**: Unofficial ESPN API integration
+- **ESPN Fantasy**: Unofficial ESPN Fantasy API integration (session-cookie auth — see `docs/TECHNICAL.md`)
 
 ## Summary
 
-The NFL MCP Server provides AI/LLM systems with comprehensive access to NFL and fantasy football data through a standardized MCP interface. With 30+ tools, advanced data enrichment, intelligent caching, and robust error handling, it enables sophisticated fantasy football analysis and decision-making workflows.
+The NFL MCP Server provides AI/LLM systems with comprehensive access to NFL and fantasy football data through a standardized MCP interface. With 60+ tools, advanced data enrichment, intelligent caching, and robust error handling, it enables sophisticated fantasy football analysis and decision-making workflows.
 
 Key strengths:
-- ✅ Comprehensive tool coverage (NFL data, fantasy leagues, player stats)
+- ✅ Comprehensive tool coverage (NFL data, ESPN fantasy leagues, player stats)
 - ✅ Advanced enrichment (snap %, usage trends, practice status)
-- ✅ Strategic planning (multi-week analysis, bye coordination, playoff prep)
+- ✅ Season strategy (Monte-Carlo playoff odds, strength of schedule, handcuff mapping)
 - ✅ Robust design (retry logic, snapshot fallback, caching)
 - ✅ Security-first (input validation, content sanitization, rate limiting)
 - ✅ LLM-optimized (consistent responses, detailed metadata, error handling)
