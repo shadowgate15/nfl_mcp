@@ -7,10 +7,9 @@ A FastMCP server that provides:
 - URL crawling tool (MCP tool for web content extraction)
 - NFL news tool (MCP tool for fetching latest NFL news from ESPN)
 - NFL teams tool (MCP tool for fetching all NFL teams from ESPN)
-- Athlete tools (MCP tools for fetching and looking up NFL athletes from Sleeper API)
-- Sleeper API tools (MCP tools for comprehensive fantasy league management):
-  - League information, rosters, users, matchups, playoffs
-  - Transactions, traded picks, NFL state, trending players
+- Athlete tools (MCP tools for fetching and looking up NFL athletes from ESPN API)
+- ESPN Fantasy tools (MCP tools for comprehensive fantasy league management):
+  - League information, rosters, standings, matchups, draft, transactions
 - Waiver wire analysis tools (MCP tools for advanced fantasy football waiver management)
 - ConfigManager integration for centralized configuration (Fix #1)
 - ContextVar-based DI for database access (Fix #2)
@@ -42,10 +41,14 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# ESPN-core has no "current season" endpoint (see ADR 0007/0008); every module
+# that needs one hardcodes this fallback, matching the `season or 2026` pattern
+# used throughout nfl_tools.py/cbs_fantasy_tools.py.
+PREFETCH_DEFAULT_SEASON = 2026
+
 # Load prefetch config once from environment (prefetch is separate from general config)
 PREFETCH_ENABLED = os.getenv("NFL_MCP_PREFETCH") == "1"
 PREFETCH_INTERVAL_SECONDS = int(os.getenv("NFL_MCP_PREFETCH_INTERVAL", "900"))
-PREFETCH_SNAPS_TTL_SECONDS = int(os.getenv("NFL_MCP_PREFETCH_SNAPS_TTL", "900"))
 PREFETCH_SCHEDULE_WEEKS = int(os.getenv("NFL_MCP_PREFETCH_SCHEDULE_WEEKS", "4"))
 # Athletes cache refresh (player names/teams/positions). Enabled by default when
 # prefetch runs; refreshed once at startup and then every ATHLETES_INTERVAL.
@@ -60,7 +63,7 @@ _shutdown_event: asyncio.Event | None = None
 
 
 async def _refresh_athletes(nfl_db: NFLDatabase, tag: str = "Prefetch") -> None:
-    """Refresh the Sleeper athletes cache (player names, teams, positions).
+    """Refresh the athletes cache (player names, teams, positions).
 
     Player→team assignments change over the offseason and season (signings,
     trades, releases), so the cache is refreshed periodically to keep enrichment
@@ -96,13 +99,15 @@ def _athletes_refresh_every_n_cycles() -> int:
 
 
 async def _prefetch_loop(nfl_db: NFLDatabase, shutdown_event: asyncio.Event):
-    """Background loop to prefetch weekly schedule and player snaps to warm caches.
+    """Background loop to prefetch weekly schedule to warm caches.
 
     Strategy:
-      - Determine season/week via get_nfl_state tool (internal call)
+      - Determine current week via get_current_nfl_week (ESPN-core scoreboard)
       - Fetch schedule for current week + upcoming weeks (stores opponents for all positions)
-      - Fetch player snaps (stores usage) with capped volume
       - Sleep until next interval or shutdown
+
+    Note: player-snap and usage-stats prefetching (Sleeper-sourced) were dropped in the
+    Sleeper-to-ESPN cutover (issue #52) with no ESPN replacement yet decided (ADR 0008).
     Controlled by env NFL_MCP_PREFETCH=1.
     """
     if not PREFETCH_ENABLED:
@@ -110,14 +115,12 @@ async def _prefetch_loop(nfl_db: NFLDatabase, shutdown_event: asyncio.Event):
         return
 
     # Import late to avoid circular
-    from .sleeper_tools import (
+    from .injury_service import get_injury_reports
+    from .nfl_enrichment import (
         ADVANCED_ENRICH_ENABLED,
-        _fetch_injuries,
         _fetch_practice_reports,
-        _fetch_week_player_snaps,
         _fetch_week_schedule,
-        _fetch_weekly_usage_stats,
-        get_nfl_state,
+        get_current_nfl_week,
     )
 
     if not ADVANCED_ENRICH_ENABLED:
@@ -126,7 +129,7 @@ async def _prefetch_loop(nfl_db: NFLDatabase, shutdown_event: asyncio.Event):
 
     logger.info(
         f"Prefetch loop started (interval={PREFETCH_INTERVAL_SECONDS}s, "
-        f"snaps_ttl={PREFETCH_SNAPS_TTL_SECONDS}s, schedule_weeks={PREFETCH_SCHEDULE_WEEKS})"
+        f"schedule_weeks={PREFETCH_SCHEDULE_WEEKS})"
     )
 
     cycle_count = 0
@@ -137,221 +140,120 @@ async def _prefetch_loop(nfl_db: NFLDatabase, shutdown_event: asyncio.Event):
 
         stats = {
             "schedule_inserted": 0,
-            "snaps_inserted": 0,
             "injuries_inserted": 0,
             "practice_inserted": 0,
-            "usage_inserted": 0,
             "schedule_error": None,
-            "snaps_error": None,
             "injuries_error": None,
             "practice_error": None,
-            "usage_error": None,
         }
 
         try:
-            state = await get_nfl_state()
-            if state.get("success") and state.get("nfl_state"):
-                st = state["nfl_state"]
-                season_raw = st.get("season") or st.get("league_season")
-                week_raw = st.get("week") or st.get("display_week")
+            season = PREFETCH_DEFAULT_SEASON
+            week = await get_current_nfl_week()
 
-                # Convert to int if they're strings
-                try:
-                    season = int(season_raw) if season_raw is not None else None
-                    week = int(week_raw) if week_raw is not None else None
-                except (ValueError, TypeError) as e:
-                    logger.warning(
-                        f"[Prefetch Cycle #{cycle_count}] Could not parse season/week: "
-                        f"season_raw={season_raw}, week_raw={week_raw}, error={e}"
-                    )
-                    season = None
-                    week = None
+            logger.info(f"[Prefetch Cycle #{cycle_count}] NFL State: season={season}, week={week}")
 
-                logger.info(f"[Prefetch Cycle #{cycle_count}] NFL State: season={season}, week={week}")
+            if week is not None:
+                # Schedule prefetch (current week + upcoming weeks for opponent data)
+                schedule_weeks_to_fetch = list(
+                    range(week, min(week + PREFETCH_SCHEDULE_WEEKS, 19))
+                )  # NFL regular season is 18 weeks
+                total_schedule_rows_inserted = 0
 
-                if season is not None and week is not None and isinstance(season, int) and isinstance(
-                    week, int
-                ):
-                    # Schedule prefetch (current week + upcoming weeks for opponent data)
-                    schedule_weeks_to_fetch = list(
-                        range(week, min(week + PREFETCH_SCHEDULE_WEEKS, 19))
-                    )  # NFL regular season is 18 weeks
-                    total_schedule_rows_inserted = 0
-
-                    for schedule_week in schedule_weeks_to_fetch:
-                        try:
-                            logger.debug(
-                                f"[Prefetch Cycle #{cycle_count}] Fetching schedule for "
-                                f"season={season}, week={schedule_week}"
-                            )
-                            sched_rows = await _fetch_week_schedule(season, schedule_week)
-                            if sched_rows:
-                                inserted = nfl_db.upsert_schedule_games(sched_rows)
-                                total_schedule_rows_inserted += inserted
-                                logger.info(
-                                    f"[Prefetch Cycle #{cycle_count}] Schedule (week {schedule_week}): "
-                                    f"{inserted} rows inserted"
-                                )
-                            else:
-                                logger.info(
-                                    f"[Prefetch Cycle #{cycle_count}] Schedule (week {schedule_week}): "
-                                    "No rows returned"
-                                )
-                        except Exception as e:
-                            stats["schedule_error"] = str(e)
-                            logger.error(
-                                f"[Prefetch Cycle #{cycle_count}] Schedule fetch (week {schedule_week}) "
-                                f"failed: {e}",
-                                exc_info=True,
-                            )
-
-                    stats["schedule_inserted"] = total_schedule_rows_inserted
-                    if total_schedule_rows_inserted > 0:
-                        logger.info(
-                            f"[Prefetch Cycle #{cycle_count}] Schedule total: "
-                            f"{total_schedule_rows_inserted} rows inserted across "
-                            f"{len(schedule_weeks_to_fetch)} weeks"
-                        )
-
-                    # Snaps prefetch (current week + previous week as fallback)
-                    # Current week might not have data yet (games not played)
-                    snap_weeks_to_fetch = [week]
-                    if week > 1:
-                        snap_weeks_to_fetch.append(week - 1)  # Add previous week
-
-                    total_snap_rows_inserted = 0
-                    for snap_week in snap_weeks_to_fetch:
-                        try:
-                            logger.debug(
-                                f"[Prefetch Cycle #{cycle_count}] Fetching snaps for "
-                                f"season={season}, week={snap_week}"
-                            )
-                            snap_rows = await _fetch_week_player_snaps(season, snap_week)
-                            # Take only first 2000 to avoid huge memory churn
-                            if snap_rows:
-                                subset = snap_rows[:2000]
-                                inserted = nfl_db.upsert_player_week_stats(subset)
-                                total_snap_rows_inserted += inserted
-                                logger.info(
-                                    f"[Prefetch Cycle #{cycle_count}] Snaps (week {snap_week}): "
-                                    f"{inserted} rows inserted from {len(snap_rows)} fetched"
-                                )
-                            else:
-                                logger.info(
-                                    f"[Prefetch Cycle #{cycle_count}] Snaps (week {snap_week}): "
-                                    "No rows returned"
-                                )
-                        except Exception as e:
-                            stats["snaps_error"] = str(e)
-                            logger.error(
-                                f"[Prefetch Cycle #{cycle_count}] Snaps fetch (week {snap_week}) "
-                                f"failed: {e}",
-                                exc_info=True,
-                            )
-
-                    stats["snaps_inserted"] = total_snap_rows_inserted
-                    if total_snap_rows_inserted > 0:
-                        logger.info(
-                            f"[Prefetch Cycle #{cycle_count}] Snaps total: "
-                            f"{total_snap_rows_inserted} rows inserted across "
-                            f"{len(snap_weeks_to_fetch)} weeks"
-                        )
-
-                    # Injuries prefetch (once per cycle, covers all teams)
+                for schedule_week in schedule_weeks_to_fetch:
                     try:
                         logger.debug(
-                            f"[Prefetch Cycle #{cycle_count}] Fetching injury reports for all teams"
+                            f"[Prefetch Cycle #{cycle_count}] Fetching schedule for "
+                            f"season={season}, week={schedule_week}"
                         )
-                        injuries = await _fetch_injuries()
-                        if injuries:
-                            inserted = nfl_db.upsert_injuries(injuries)
-                            stats["injuries_inserted"] = inserted
+                        sched_rows = await _fetch_week_schedule(season, schedule_week)
+                        if sched_rows:
+                            inserted = nfl_db.upsert_schedule_games(sched_rows)
+                            total_schedule_rows_inserted += inserted
                             logger.info(
-                                f"[Prefetch Cycle #{cycle_count}] Injuries: "
-                                f"{inserted} rows inserted from {len(injuries)} fetched"
+                                f"[Prefetch Cycle #{cycle_count}] Schedule (week {schedule_week}): "
+                                f"{inserted} rows inserted"
                             )
                         else:
-                            logger.info(f"[Prefetch Cycle #{cycle_count}] Injuries: No rows returned")
+                            logger.info(
+                                f"[Prefetch Cycle #{cycle_count}] Schedule (week {schedule_week}): "
+                                "No rows returned"
+                            )
                     except Exception as e:
-                        stats["injuries_error"] = str(e)
+                        stats["schedule_error"] = str(e)
                         logger.error(
-                            f"[Prefetch Cycle #{cycle_count}] Injuries fetch failed: {e}",
+                            f"[Prefetch Cycle #{cycle_count}] Schedule fetch (week {schedule_week}) "
+                            f"failed: {e}",
                             exc_info=True,
                         )
 
-                    # Practice reports (Thu-Sat only to capture weekly injury reports)
-                    weekday = datetime.now(UTC).weekday()
-                    logger.debug(
-                        f"[Prefetch Cycle #{cycle_count}] Current weekday: "
-                        f"{weekday} ({'Thu' if weekday == 3 else 'Fri' if weekday == 4 else 'Sat' if weekday == 5 else 'Other'})"
+                stats["schedule_inserted"] = total_schedule_rows_inserted
+                if total_schedule_rows_inserted > 0:
+                    logger.info(
+                        f"[Prefetch Cycle #{cycle_count}] Schedule total: "
+                        f"{total_schedule_rows_inserted} rows inserted across "
+                        f"{len(schedule_weeks_to_fetch)} weeks"
                     )
-                    if weekday in [3, 4, 5]:  # Thu=3, Fri=4, Sat=5
-                        try:
-                            logger.debug(
-                                f"[Prefetch Cycle #{cycle_count}] Fetching practice reports "
-                                f"for season={season}, week={week}"
-                            )
-                            practice_reports = await _fetch_practice_reports(season, week)
-                            if practice_reports:
-                                inserted = nfl_db.upsert_practice_status(practice_reports)
-                                stats["practice_inserted"] = inserted
-                                logger.info(
-                                    f"[Prefetch Cycle #{cycle_count}] Practice: "
-                                    f"{inserted} rows inserted"
-                                )
-                            else:
-                                logger.info(
-                                    f"[Prefetch Cycle #{cycle_count}] Practice: No rows returned "
-                                    f"(implementation pending)"
-                                )
-                        except Exception as e:
-                            stats["practice_error"] = str(e)
-                            logger.error(
-                                f"[Prefetch Cycle #{cycle_count}] Practice fetch failed: {e}",
-                                exc_info=True,
-                            )
-                    else:
-                        logger.debug(
-                            f"[Prefetch Cycle #{cycle_count}] Practice: Skipped (only runs Thu-Sat)"
-                        )
 
-                    # Usage stats (fetch previous week for rolling averages)
-                    if week > 1:
-                        try:
-                            logger.debug(
-                                f"[Prefetch Cycle #{cycle_count}] Fetching usage stats for "
-                                f"season={season}, week={week-1}"
-                            )
-                            usage_stats = await _fetch_weekly_usage_stats(season, week - 1)
-                            if usage_stats:
-                                inserted = nfl_db.upsert_usage_stats(usage_stats)
-                                stats["usage_inserted"] = inserted
-                                logger.info(
-                                    f"[Prefetch Cycle #{cycle_count}] Usage: "
-                                    f"{inserted} rows inserted (week {week-1})"
-                                )
-                            else:
-                                logger.info(
-                                    f"[Prefetch Cycle #{cycle_count}] Usage: No rows returned"
-                                )
-                        except Exception as e:
-                            stats["usage_error"] = str(e)
-                            logger.error(
-                                f"[Prefetch Cycle #{cycle_count}] Usage fetch failed: {e}",
-                                exc_info=True,
-                            )
+                # Injuries prefetch (once per cycle, covers all teams)
+                try:
+                    logger.debug(
+                        f"[Prefetch Cycle #{cycle_count}] Fetching injury reports for all teams"
+                    )
+                    injuries = await get_injury_reports(db=nfl_db)
+                    if injuries:
+                        inserted = nfl_db.upsert_injuries(injuries)
+                        stats["injuries_inserted"] = inserted
+                        logger.info(
+                            f"[Prefetch Cycle #{cycle_count}] Injuries: "
+                            f"{inserted} rows inserted from {len(injuries)} fetched"
+                        )
                     else:
+                        logger.info(f"[Prefetch Cycle #{cycle_count}] Injuries: No rows returned")
+                except Exception as e:
+                    stats["injuries_error"] = str(e)
+                    logger.error(
+                        f"[Prefetch Cycle #{cycle_count}] Injuries fetch failed: {e}",
+                        exc_info=True,
+                    )
+
+                # Practice reports (Thu-Sat only to capture weekly injury reports)
+                weekday = datetime.now(UTC).weekday()
+                logger.debug(
+                    f"[Prefetch Cycle #{cycle_count}] Current weekday: "
+                    f"{weekday} ({'Thu' if weekday == 3 else 'Fri' if weekday == 4 else 'Sat' if weekday == 5 else 'Other'})"
+                )
+                if weekday in [3, 4, 5]:  # Thu=3, Fri=4, Sat=5
+                    try:
                         logger.debug(
-                            f"[Prefetch Cycle #{cycle_count}] Usage: Skipped (week={week}, need week > 1)"
+                            f"[Prefetch Cycle #{cycle_count}] Fetching practice reports "
+                            f"for season={season}, week={week}"
+                        )
+                        practice_reports = await _fetch_practice_reports(season, week)
+                        if practice_reports:
+                            inserted = nfl_db.upsert_practice_status(practice_reports)
+                            stats["practice_inserted"] = inserted
+                            logger.info(
+                                f"[Prefetch Cycle #{cycle_count}] Practice: "
+                                f"{inserted} rows inserted"
+                            )
+                        else:
+                            logger.info(
+                                f"[Prefetch Cycle #{cycle_count}] Practice: No rows returned "
+                                f"(implementation pending)"
+                            )
+                    except Exception as e:
+                        stats["practice_error"] = str(e)
+                        logger.error(
+                            f"[Prefetch Cycle #{cycle_count}] Practice fetch failed: {e}",
+                            exc_info=True,
                         )
                 else:
-                    logger.warning(
-                        f"[Prefetch Cycle #{cycle_count}] Invalid season/week: "
-                        f"season={season} (type={type(season).__name__}), "
-                        f"week={week} (type={type(week).__name__})"
+                    logger.debug(
+                        f"[Prefetch Cycle #{cycle_count}] Practice: Skipped (only runs Thu-Sat)"
                     )
             else:
-                logger.warning(f"[Prefetch Cycle #{cycle_count}] NFL state unavailable or unsuccessful")
+                logger.warning(f"[Prefetch Cycle #{cycle_count}] Current NFL week unavailable")
         except Exception as e:
             logger.error(
                 f"[Prefetch Cycle #{cycle_count}] Iteration error: {e}", exc_info=True
@@ -363,28 +265,22 @@ async def _prefetch_loop(nfl_db: NFLDatabase, shutdown_event: asyncio.Event):
         logger.info(
             f"[Prefetch Cycle #{cycle_count}] Completed in {cycle_duration:.2f}s - "
             f"Schedule: {stats['schedule_inserted']} rows, "
-            f"Snaps: {stats['snaps_inserted']} rows, "
             f"Injuries: {stats['injuries_inserted']} rows, "
-            f"Practice: {stats['practice_inserted']} rows, "
-            f"Usage: {stats['usage_inserted']} rows"
+            f"Practice: {stats['practice_inserted']} rows"
         )
 
         if any(
             [
                 stats["schedule_error"],
-                stats["snaps_error"],
                 stats["injuries_error"],
                 stats["practice_error"],
-                stats["usage_error"],
             ]
         ):
             logger.warning(
                 f"[Prefetch Cycle #{cycle_count}] Errors occurred - "
                 f"Schedule: {stats['schedule_error'] or 'OK'}, "
-                f"Snaps: {stats['snaps_error'] or 'OK'}, "
                 f"Injuries: {stats['injuries_error'] or 'OK'}, "
-                f"Practice: {stats['practice_error'] or 'OK'}, "
-                f"Usage: {stats['usage_error'] or 'OK'}"
+                f"Practice: {stats['practice_error'] or 'OK'}"
             )
 
         # Run snapshot cleanup once per day (every 96 cycles at 15min interval)
@@ -494,27 +390,13 @@ def _create_prefetch_lifespan(nfl_db: NFLDatabase):
 
         if PREFETCH_ENABLED:
             # Import late to avoid circular
-            from .sleeper_tools import (
-                ADVANCED_ENRICH_ENABLED,
-                _fetch_all_team_schedules,
-                get_nfl_state,
-            )
+            from .nfl_enrichment import ADVANCED_ENRICH_ENABLED, _fetch_all_team_schedules
 
             if ADVANCED_ENRICH_ENABLED:
                 # Run initial startup prefetch (schedules for all 32 teams)
                 logger.info("[Startup Prefetch] Running initial cache warm-up...")
                 try:
-                    # Get current season
-                    state = await get_nfl_state()
-                    season = 2026  # Default
-                    if state.get("success") and state.get("nfl_state"):
-                        season_raw = state["nfl_state"].get(
-                            "season"
-                        ) or state["nfl_state"].get("league_season")
-                        try:
-                            season = int(season_raw) if season_raw is not None else 2026
-                        except (ValueError, TypeError):
-                            season = 2026
+                    season = PREFETCH_DEFAULT_SEASON
 
                     logger.info(
                         f"[Startup Prefetch] Fetching schedules for all 32 teams (season={season})..."

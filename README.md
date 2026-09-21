@@ -6,7 +6,7 @@
 [![Data-source watchdog](https://github.com/gtonic/nfl_mcp/actions/workflows/contracts.yml/badge.svg)](https://github.com/gtonic/nfl_mcp/actions/workflows/contracts.yml)
 [![Docker image](https://img.shields.io/badge/image-ghcr.io%2Fgtonic%2Fnfl__mcp-2496ED?logo=docker&logoColor=white)](https://github.com/gtonic/nfl_mcp/pkgs/container/nfl_mcp)
 [![Python 3.11 | 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://github.com/gtonic/nfl_mcp)
-[![70+ MCP tools](https://img.shields.io/badge/MCP%20tools-70%2B-8A2BE2)](#-whats-inside)
+[![60+ MCP tools](https://img.shields.io/badge/MCP%20tools-60%2B-8A2BE2)](#-whats-inside)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 NFL MCP turns real NFL & fantasy data into a decisive edge — a suite of tools that plug
@@ -38,7 +38,7 @@ assistant** and answers the question you actually asked.
 
 **🎯 Draft day**
 - **VBD draft board** ranked by *value over replacement* — the ordering that wins drafts, not raw ADP.
-- **Live "war room"** — during your real Sleeper draft it reads the board live and calls the best pick *for your roster*, with **value-cliff** warnings and **positional-run** alerts.
+- **Live "war room"** — during your real ESPN draft it reads the board live and calls the best pick *for your roster*, with **value-cliff** warnings and **positional-run** alerts.
 - **Rehearse first** — run 100 mock drafts from your slot before you're on the clock.
 
 **📊 Every week**
@@ -54,11 +54,11 @@ assistant** and answers the question you actually asked.
 **🏆 Season strategy**
 - **Monte-Carlo playoff odds** — *"72% to make it — 84% if you win this week."* Real probabilities, not vibes.
 - **Strength of schedule** — rest-of-season and **playoff-week (15-17)** difficulty per position, for stash and trade-deadline calls.
-- Bye-week coordination, trade-deadline timing, opponent-weakness scouting.
+- Opponent-weakness scouting — find the exploitable spot on the team you're facing.
 
 ## ✅ Why you can trust it
 
-- **Real data, zero gut-feeling heuristics** — market-consensus values ([FantasyCalc](https://fantasycalc.com)), real weekly stats ([nflverse](https://github.com/nflverse)), your live league ([Sleeper](https://sleeper.com)), news & injuries (ESPN), weather ([Open-Meteo](https://open-meteo.com)). **No paid API keys required to start.**
+- **Real data, zero gut-feeling heuristics** — market-consensus values ([FantasyCalc](https://fantasycalc.com)), real weekly stats ([nflverse](https://github.com/nflverse)), your live league ([ESPN Fantasy](https://fantasy.espn.com)), news & injuries (ESPN), weather ([Open-Meteo](https://open-meteo.com)). **No paid API keys required to start** — connecting your own ESPN league needs a one-time cookie pull (see below), not a key.
 - **Honest about uncertainty** — when it lacks live data it *says so* (and falls back transparently) instead of faking a confident call.
 - **It grades its own accuracy.** A built-in backtest measures whether its projections actually beat a baseline on real past seasons, and a daily watchdog alerts if a data source changes. *Most fantasy tools never check whether they're right. This one does.*
 
@@ -68,9 +68,18 @@ assistant** and answers the question you actually asked.
 docker run --rm -p 9000:9000 ghcr.io/gtonic/nfl_mcp:latest
 ```
 
-Connect it to your assistant, then just ask:
+Connect it to your assistant and ask about news, player values, projections, or run a
+mock draft — no setup needed. For **your own ESPN league** (rosters, live drafts,
+matchups, waivers), pull your ESPN session cookies once and pass them to the server:
 
-> *"My Sleeper username is `gary` — find my league, build my draft board, and simulate a draft from my slot."*
+```bash
+uv run python scripts/espn_cookie_pull.py   # opens a real browser, log in, writes .env
+docker run --rm -p 9000:9000 --env-file .env ghcr.io/gtonic/nfl_mcp:latest
+```
+
+Then just ask:
+
+> *"My ESPN league id is `1234567` — build my draft board and simulate a draft from my slot."*
 
 **Claude Code (CLI):**
 ```bash
@@ -91,26 +100,26 @@ Draft-day walkthrough → **[docs/DRAFT_DAY.md](docs/DRAFT_DAY.md)**.
 
 ## 🧰 What's inside
 
-70+ MCP tools over HTTP, grouped by what they do. Every tool's full parameter reference
+60+ MCP tools over HTTP, grouped by what they do. Every tool's full parameter reference
 lives in **[AGENT.md](AGENT.md)**; below is the map.
 
 **🎯 Draft & player values**
-`get_draft_board` (VBD-tiered board) · `recommend_draft_pick` (best pick live) · `simulate_draft` (offline mock) · `get_player_values` / `get_player_value` (market consensus) · `analyze_trade` (fairness on real values) · `get_league_drafts` · `get_draft` · `get_draft_picks` · `get_draft_traded_picks`
+`get_draft_board` (VBD-tiered board) · `recommend_draft_pick` (best pick live, ESPN league) · `simulate_draft` (offline mock) · `get_player_values` / `get_player_value` (market consensus) · `analyze_trade` (fairness on real values)
 
 **📊 Weekly lineup & projections**
 `project_player` / `project_players` (transparent weekly points) · `get_start_sit_recommendation` · `get_roster_recommendations` · `compare_players_for_slot` · `analyze_full_lineup`
 
 **🗓️ Matchup, schedule & environment**
-`get_defense_rankings` · `get_matchup_difficulty` · `analyze_roster_matchups` · `get_strength_of_schedule` (ROS SOS) · `get_playoff_sos` (weeks 15-17) · `get_streaming_options` (DST/K/QB/TE streaming) · `get_weather_forecast` (wind/weather impact) · `get_strategic_matchup_preview` · `get_vegas_lines` · `get_game_environment` · `analyze_roster_vegas` · `get_stack_opportunities`
+`get_defense_rankings` · `get_matchup_difficulty` · `analyze_roster_matchups` · `get_strength_of_schedule` (ROS SOS) · `get_playoff_sos` (weeks 15-17) · `get_streaming_options` (DST/K/QB/TE streaming) · `get_weather_forecast` (wind/weather impact) · `get_vegas_lines` · `get_game_environment` · `analyze_roster_vegas` · `get_stack_opportunities`
 
 **🏆 Season strategy & opponents**
-`get_playoff_odds` (Monte-Carlo) · `get_season_bye_week_coordination` · `get_trade_deadline_analysis` · `get_playoff_preparation_plan` · `analyze_opponent`
+`get_playoff_odds` (Monte-Carlo) · `analyze_opponent` (roster weaknesses to exploit)
 
 **💸 Waivers & FAAB**
-`get_waiver_wire_dashboard` · `get_waiver_log` · `check_re_entry_status` · `recommend_faab_bid`
+`get_waiver_wire_dashboard` · `get_waiver_log` · `check_re_entry_status` · `recommend_faab_bid` · `get_handcuff_map`
 
-**🏈 Your Sleeper league**
-`get_league` · `get_rosters` · `get_league_users` · `get_matchups` · `get_playoff_bracket` · `get_transactions` · `get_traded_picks` · `get_trending_players` · `get_fantasy_context` (aggregate) · `get_nfl_state` · `get_user` · `get_user_leagues` · `fetch_all_players`
+**🏈 Your ESPN Fantasy league**
+`get_espn_league` (settings) · `get_espn_rosters` · `get_espn_standings` · `get_espn_scoreboard` · `get_espn_matchups` (box scores) · `get_espn_draft` · `get_espn_transactions` (waivers/trades log) · `get_espn_free_agents` · `get_espn_players` (full pro pool) · `get_espn_player_news`. League-scoped tools need `ESPN_S2`/`ESPN_SWID` cookies — see [docs/TECHNICAL.md](docs/TECHNICAL.md#going-live-connect-your-ai-client).
 
 **🩺 Injuries & availability**
 `get_injury_report` · `get_high_confidence_injuries` (multi-source) · `get_gameday_inactives`

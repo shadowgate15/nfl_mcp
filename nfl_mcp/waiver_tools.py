@@ -11,9 +11,62 @@ from collections import defaultdict
 from datetime import datetime
 
 from .errors import ErrorType, create_error_response, create_success_response
-from .sleeper_tools import get_transactions
+from .espn_fantasy_tools import get_espn_transactions
 
 logger = logging.getLogger(__name__)
+
+
+def _adapt_espn_transactions(transactions: list[dict]) -> list[dict]:
+    """Fold ESPN's per-transaction `items[]` shape into the flat `adds`/`drops`
+    dict `WaiverAnalyzer._extract_waiver_transactions` expects.
+
+    Each ESPN transaction carries an `items[]` list of per-player moves
+    (`type` "ADD"|"DROP", `playerId`, `toTeamId`/`fromTeamId`) rather than
+    Sleeper's already-flat `adds`/`drops` dicts — this rebuilds that flat
+    shape so the existing dedup/re-entry logic needs no changes. Sleeper's
+    `waiver_budget` transfer list has no ESPN equivalent, so it's simply
+    omitted here rather than translated.
+    """
+    adapted = []
+
+    for transaction in transactions:
+        adds: dict[str, int] = {}
+        drops: dict[str, int] = {}
+        roster_ids: set[int] = set()
+
+        team_id = transaction.get('teamId')
+        if team_id is not None:
+            roster_ids.add(team_id)
+
+        for item in transaction.get('items', []):
+            player_id = item.get('playerId')
+            if player_id is None:
+                continue
+            player_key = str(player_id)
+
+            if item.get('type') == 'ADD':
+                to_team_id = item.get('toTeamId')
+                adds[player_key] = to_team_id
+                if to_team_id is not None:
+                    roster_ids.add(to_team_id)
+            elif item.get('type') == 'DROP':
+                from_team_id = item.get('fromTeamId')
+                drops[player_key] = from_team_id
+                if from_team_id is not None:
+                    roster_ids.add(from_team_id)
+
+        adapted.append({
+            'transaction_id': transaction.get('id'),
+            'type': transaction.get('type'),
+            'status': transaction.get('status'),
+            'created': transaction.get('processDate', transaction.get('proposedDate')),
+            'adds': adds,
+            'drops': drops,
+            'roster_ids': sorted(roster_ids),
+            'week': transaction.get('scoringPeriodId'),
+        })
+
+    return adapted
 
 
 class WaiverAnalyzer:
@@ -28,8 +81,10 @@ class WaiverAnalyzer:
         waiver_transactions = []
 
         for transaction in transactions:
-            # Check if this is a waiver transaction
-            if transaction.get('type') in ['waiver', 'free_agent']:
+            # Check if this is a waiver transaction (ESPN's native vocabulary,
+            # adopted wholesale per ADR 0007 rather than translated to
+            # Sleeper's 'waiver'/'free_agent' strings)
+            if transaction.get('type') in ['WAIVER', 'FREEAGENT']:
                 # Process adds and drops
                 adds = transaction.get('adds', {})
                 drops = transaction.get('drops', {})
@@ -152,7 +207,7 @@ class WaiverAnalyzer:
         return re_entry_analysis
 
 
-async def get_waiver_log(league_id: str, round: int | None = None, dedupe: bool = True) -> dict:
+async def get_waiver_log(league_id: str, week: int | None = None, year: int | None = None, dedupe: bool = True) -> dict:
     """
     Get waiver wire log with optional de-duplication.
 
@@ -161,7 +216,8 @@ async def get_waiver_log(league_id: str, round: int | None = None, dedupe: bool 
 
     Args:
         league_id: The unique identifier for the league
-        round: Optional round number to filter transactions
+        week: Optional week (ESPN scoring period) to filter transactions
+        year: Optional season year; defaults to the current year
         dedupe: Whether to perform de-duplication (default: True)
 
     Returns:
@@ -171,14 +227,15 @@ async def get_waiver_log(league_id: str, round: int | None = None, dedupe: bool 
         - total_transactions: Total number of waiver transactions before deduplication
         - unique_transactions: Number of unique transactions after deduplication
         - league_id: The league ID processed
-        - round: The round processed (if specified)
+        - week: The week processed (if specified)
+        - year: The year processed (if specified)
         - deduplication_enabled: Whether deduplication was performed
         - success: Whether the request was successful
         - error: Error message (if any)
     """
     try:
         # Get raw transaction data
-        transactions_result = await get_transactions(league_id, round)
+        transactions_result = await get_espn_transactions(league_id, week=week, types=["WAIVER", "FREEAGENT"], year=year)
 
         if not transactions_result.get('success'):
             return create_error_response(
@@ -187,7 +244,7 @@ async def get_waiver_log(league_id: str, round: int | None = None, dedupe: bool 
                 {"waiver_log": [], "duplicates_found": [], "total_transactions": 0, "unique_transactions": 0}
             )
 
-        transactions = transactions_result.get('transactions', [])
+        transactions = _adapt_espn_transactions(transactions_result.get('transactions', []))
 
         # Initialize analyzer
         analyzer = WaiverAnalyzer()
@@ -207,7 +264,8 @@ async def get_waiver_log(league_id: str, round: int | None = None, dedupe: bool 
                 "total_transactions": total_waiver_count,
                 "unique_transactions": len(unique_transactions),
                 "league_id": league_id,
-                "round": round,
+                "week": week,
+                "year": year,
                 "deduplication_enabled": True
             })
         else:
@@ -218,7 +276,8 @@ async def get_waiver_log(league_id: str, round: int | None = None, dedupe: bool 
                 "total_transactions": total_waiver_count,
                 "unique_transactions": total_waiver_count,
                 "league_id": league_id,
-                "round": round,
+                "week": week,
+                "year": year,
                 "deduplication_enabled": False
             })
 
@@ -231,7 +290,7 @@ async def get_waiver_log(league_id: str, round: int | None = None, dedupe: bool 
         )
 
 
-async def check_re_entry_status(league_id: str, round: int | None = None) -> dict:
+async def check_re_entry_status(league_id: str, week: int | None = None, year: int | None = None) -> dict:
     """
     Check re-entry status for players in waiver wire activity.
 
@@ -240,7 +299,8 @@ async def check_re_entry_status(league_id: str, round: int | None = None) -> dic
 
     Args:
         league_id: The unique identifier for the league
-        round: Optional round number to filter transactions
+        week: Optional week (ESPN scoring period) to filter transactions
+        year: Optional season year; defaults to the current year
 
     Returns:
         A dictionary containing:
@@ -249,13 +309,14 @@ async def check_re_entry_status(league_id: str, round: int | None = None) -> dic
         - total_players_analyzed: Number of players with waiver activity
         - players_with_re_entries: Number of players with at least one re-entry
         - league_id: The league ID processed
-        - round: The round processed (if specified)
+        - week: The week processed (if specified)
+        - year: The year processed (if specified)
         - success: Whether the request was successful
         - error: Error message (if any)
     """
     try:
         # Get raw transaction data
-        transactions_result = await get_transactions(league_id, round)
+        transactions_result = await get_espn_transactions(league_id, week=week, types=["WAIVER", "FREEAGENT"], year=year)
 
         if not transactions_result.get('success'):
             return create_error_response(
@@ -264,7 +325,7 @@ async def check_re_entry_status(league_id: str, round: int | None = None) -> dic
                 {"re_entry_players": {}, "volatile_players": [], "total_players_analyzed": 0, "players_with_re_entries": 0}
             )
 
-        transactions = transactions_result.get('transactions', [])
+        transactions = _adapt_espn_transactions(transactions_result.get('transactions', []))
 
         # Initialize analyzer
         analyzer = WaiverAnalyzer()
@@ -293,7 +354,8 @@ async def check_re_entry_status(league_id: str, round: int | None = None) -> dic
             "total_players_analyzed": len(all_players),
             "players_with_re_entries": len(re_entry_analysis),
             "league_id": league_id,
-            "round": round
+            "week": week,
+            "year": year
         })
 
     except Exception as e:
@@ -305,7 +367,7 @@ async def check_re_entry_status(league_id: str, round: int | None = None) -> dic
         )
 
 
-async def get_waiver_wire_dashboard(league_id: str, round: int | None = None) -> dict:
+async def get_waiver_wire_dashboard(league_id: str, week: int | None = None, year: int | None = None) -> dict:
     """
     Get comprehensive waiver wire dashboard with analysis.
 
@@ -314,7 +376,8 @@ async def get_waiver_wire_dashboard(league_id: str, round: int | None = None) ->
 
     Args:
         league_id: The unique identifier for the league
-        round: Optional round number to filter transactions
+        week: Optional week (ESPN scoring period) to filter transactions
+        year: Optional season year; defaults to the current year
 
     Returns:
         A dictionary containing:
@@ -322,7 +385,8 @@ async def get_waiver_wire_dashboard(league_id: str, round: int | None = None) ->
         - re_entry_analysis: Re-entry status for players
         - dashboard_summary: Summary statistics and insights
         - league_id: The league ID processed
-        - round: The round processed (if specified)
+        - week: The week processed (if specified)
+        - year: The year processed (if specified)
         - success: Whether the request was successful
         - error: Error message (if any)
 
@@ -331,7 +395,7 @@ async def get_waiver_wire_dashboard(league_id: str, round: int | None = None) ->
     """
     try:
         # Get waiver log with deduplication
-        waiver_log_result = await get_waiver_log(league_id, round, dedupe=True)
+        waiver_log_result = await get_waiver_log(league_id, week=week, year=year, dedupe=True)
 
         if not waiver_log_result.get('success'):
             return create_error_response(
@@ -341,7 +405,7 @@ async def get_waiver_wire_dashboard(league_id: str, round: int | None = None) ->
             )
 
         # Get re-entry analysis
-        re_entry_result = await check_re_entry_status(league_id, round)
+        re_entry_result = await check_re_entry_status(league_id, week=week, year=year)
 
         if not re_entry_result.get('success'):
             return create_error_response(
@@ -373,7 +437,8 @@ async def get_waiver_wire_dashboard(league_id: str, round: int | None = None) ->
             "dashboard_summary": dashboard_summary,
             "volatile_players": re_entry_result.get('volatile_players', []),
             "league_id": league_id,
-            "round": round
+            "week": week,
+            "year": year
         })
 
     except Exception as e:

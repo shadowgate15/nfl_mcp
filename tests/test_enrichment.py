@@ -1,5 +1,5 @@
 """
-Tests for enrichment helper functions in sleeper_tools.py.
+Tests for enrichment helper functions in nfl_enrichment.py.
 
 Tests cover:
 - _calculate_usage_trend: Usage metric trend calculation
@@ -22,7 +22,7 @@ class TestCalculateUsageTrend:
 
     def test_upward_trend_targets(self):
         """Test upward trend detection for targets."""
-        from nfl_mcp.sleeper_tools import _calculate_usage_trend
+        from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
         # Most recent week has significantly more targets
         weekly_data = [
@@ -35,7 +35,7 @@ class TestCalculateUsageTrend:
 
     def test_downward_trend_targets(self):
         """Test downward trend detection for targets."""
-        from nfl_mcp.sleeper_tools import _calculate_usage_trend
+        from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
         # Most recent week has significantly fewer targets
         weekly_data = [
@@ -48,7 +48,7 @@ class TestCalculateUsageTrend:
 
     def test_flat_trend_targets(self):
         """Test flat trend detection for targets."""
-        from nfl_mcp.sleeper_tools import _calculate_usage_trend
+        from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
         # Most recent week is similar to prior weeks
         weekly_data = [
@@ -61,7 +61,7 @@ class TestCalculateUsageTrend:
 
     def test_insufficient_data_single_week(self):
         """Test None return when only one week of data."""
-        from nfl_mcp.sleeper_tools import _calculate_usage_trend
+        from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
         weekly_data = [{"targets": 10}]
         result = _calculate_usage_trend(weekly_data, "targets")
@@ -69,14 +69,14 @@ class TestCalculateUsageTrend:
 
     def test_insufficient_data_empty(self):
         """Test None return when no data."""
-        from nfl_mcp.sleeper_tools import _calculate_usage_trend
+        from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
         result = _calculate_usage_trend([], "targets")
         assert result is None, f"Expected None but got '{result}'"
 
     def test_none_values_filtered(self):
         """Test that None values in weekly data are filtered out."""
-        from nfl_mcp.sleeper_tools import _calculate_usage_trend
+        from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
         weekly_data = [
             {"targets": 10},  # Most recent
@@ -89,7 +89,7 @@ class TestCalculateUsageTrend:
 
     def test_routes_trend(self):
         """Test trend calculation for routes metric."""
-        from nfl_mcp.sleeper_tools import _calculate_usage_trend
+        from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
         weekly_data = [
             {"routes": 35},  # Most recent
@@ -102,7 +102,7 @@ class TestCalculateUsageTrend:
 
     def test_snap_share_trend(self):
         """Test trend calculation for snap_share metric."""
-        from nfl_mcp.sleeper_tools import _calculate_usage_trend
+        from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
         weekly_data = [
             {"snap_share": 45.0},  # Most recent
@@ -115,7 +115,7 @@ class TestCalculateUsageTrend:
 
     def test_zero_prior_average_with_positive_recent(self):
         """Test edge case where prior average is 0 but recent is positive."""
-        from nfl_mcp.sleeper_tools import _calculate_usage_trend
+        from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
         weekly_data = [
             {"targets": 5},  # Most recent (positive)
@@ -127,7 +127,7 @@ class TestCalculateUsageTrend:
 
     def test_zero_prior_average_with_zero_recent(self):
         """Test edge case where both prior and recent are 0."""
-        from nfl_mcp.sleeper_tools import _calculate_usage_trend
+        from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
         weekly_data = [
             {"targets": 0},
@@ -143,56 +143,56 @@ class TestEstimateSnapPct:
 
     def test_qb_starter(self):
         """Test QB starter gets ~95% snap estimate."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(1, "QB")
         assert result == 95.0, f"Expected 95.0 for QB starter, got {result}"
 
     def test_qb_backup(self):
         """Test QB backup gets ~5% snap estimate."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(2, "QB")
         assert result == 5.0, f"Expected 5.0 for QB backup, got {result}"
 
     def test_rb_starter(self):
         """Test RB starter gets ~55% snap estimate (committee consideration)."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(1, "RB")
         assert result == 55.0, f"Expected 55.0 for RB starter, got {result}"
 
     def test_rb_backup(self):
         """Test RB backup gets ~35% snap estimate."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(2, "RB")
         assert result == 35.0, f"Expected 35.0 for RB backup, got {result}"
 
     def test_wr_starter(self):
         """Test WR starter gets ~85% snap estimate."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(1, "WR")
         assert result == 85.0, f"Expected 85.0 for WR starter, got {result}"
 
     def test_wr_backup(self):
         """Test WR backup (#2 receiver) gets ~50% snap estimate."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(2, "WR")
         assert result == 50.0, f"Expected 50.0 for WR backup, got {result}"
 
     def test_te_starter(self):
         """Test TE starter gets ~65% snap estimate."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(1, "TE")
         assert result == 65.0, f"Expected 65.0 for TE starter, got {result}"
 
     def test_third_string_low_snaps(self):
         """Test third string or lower gets ~15% snap estimate."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(3, "RB")
         assert result == 15.0, f"Expected 15.0 for third string, got {result}"
@@ -202,21 +202,21 @@ class TestEstimateSnapPct:
 
     def test_unknown_position_starter(self):
         """Test unknown position starter gets default 70%."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(1, "K")  # Kicker
         assert result == 70.0, f"Expected 70.0 for unknown position starter, got {result}"
 
     def test_unknown_position_backup(self):
         """Test unknown position backup gets default 45%."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(2, "K")
         assert result == 45.0, f"Expected 45.0 for unknown position backup, got {result}"
 
     def test_none_depth_rank(self):
         """Test None depth rank returns None."""
-        from nfl_mcp.sleeper_tools import _estimate_snap_pct
+        from nfl_mcp.nfl_enrichment import _estimate_snap_pct
 
         result = _estimate_snap_pct(None, "WR")
         assert result is None, f"Expected None for None depth rank, got {result}"
@@ -435,7 +435,7 @@ class TestMatchupEnrichment:
 
     def test_matchup_enrichment_adds_fields(self):
         """Test that matchup enrichment adds expected fields."""
-        from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+        from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
         # Create mock database
         mock_db = MagicMock()
@@ -474,7 +474,7 @@ class TestMatchupEnrichment:
 
     def test_matchup_enrichment_fallback(self):
         """Test matchup enrichment uses fallback when real data unavailable."""
-        from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+        from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
         mock_db = MagicMock()
         mock_db.get_player_snap_pct.return_value = None
@@ -508,7 +508,7 @@ class TestMatchupEnrichment:
 
     def test_matchup_enrichment_skipped_for_def(self):
         """Test that matchup enrichment is skipped for DEF position."""
-        from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+        from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
         mock_db = MagicMock()
         mock_db.get_player_snap_pct.return_value = None
@@ -533,7 +533,7 @@ class TestMatchupEnrichment:
 
     def test_matchup_enrichment_no_opponent(self):
         """Test matchup enrichment is skipped when no opponent."""
-        from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+        from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
         mock_db = MagicMock()
         mock_db.get_player_snap_pct.return_value = None
@@ -556,7 +556,7 @@ class TestMatchupEnrichment:
 
     def test_matchup_enrichment_exception_handling(self):
         """Test matchup enrichment handles exceptions gracefully."""
-        from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+        from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
         mock_db = MagicMock()
         mock_db.get_player_snap_pct.return_value = None
@@ -587,7 +587,7 @@ class TestVegasEnrichment:
 
     def test_vegas_enrichment_shootout_game(self):
         """Test Vegas enrichment for high-total shootout game."""
-        from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+        from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
         mock_db = MagicMock()
         mock_db.get_player_snap_pct.return_value = None
@@ -641,7 +641,7 @@ class TestVegasEnrichment:
 
     def test_vegas_enrichment_low_scoring_game(self):
         """Test Vegas enrichment for defensive battle."""
-        from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+        from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
         mock_db = MagicMock()
         mock_db.get_player_snap_pct.return_value = None
@@ -693,7 +693,7 @@ class TestVegasEnrichment:
 
     def test_vegas_enrichment_fallback(self):
         """Test Vegas enrichment falls back gracefully when no data."""
-        from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+        from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
         mock_db = MagicMock()
         mock_db.get_player_snap_pct.return_value = None
@@ -734,7 +734,7 @@ class TestVegasEnrichment:
 
     def test_vegas_enrichment_skipped_for_def(self):
         """Test Vegas enrichment is skipped for DEF position."""
-        from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+        from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
         mock_db = MagicMock()
         mock_db.get_player_snap_pct.return_value = None
@@ -760,7 +760,7 @@ class TestVegasEnrichment:
 
     def test_vegas_enrichment_exception_handling(self):
         """Test Vegas enrichment handles exceptions gracefully."""
-        from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+        from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
         mock_db = MagicMock()
         mock_db.get_player_snap_pct.return_value = None

@@ -169,7 +169,7 @@ class TestGetStrengthOfSchedule:
     async def test_no_network_when_schedule_cached(self):
         analyzer = self._analyzer_with_schedule()
         with patch("nfl_mcp.matchup_tools.get_defense_analyzer", return_value=analyzer), \
-                patch("nfl_mcp.sleeper_tools._fetch_week_schedule") as mock_fetch:
+                patch("nfl_mcp.nfl_enrichment._fetch_week_schedule") as mock_fetch:
             await get_strength_of_schedule(season=2026, start_week=15, end_week=17)
         mock_fetch.assert_not_called()
 

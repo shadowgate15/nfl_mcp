@@ -6,6 +6,7 @@ import pytest
 from nfl_mcp import matchup_tools
 from nfl_mcp.streaming_tools import (
     _resolve_offense,
+    _rostered_ids,
     _strength_score,
     _unit_availability,
     compute_streaming_scores,
@@ -216,12 +217,44 @@ class TestGetStreamingOptions:
         assert bad_ahead["success"] is False and "weeks_ahead" in bad_ahead["error"]
 
 
+class TestRosteredIds:
+    @pytest.mark.asyncio
+    async def test_resolves_both_espn_roster_entry_nesting_shapes(self):
+        # ESPN nests a roster entry's player either bare under "player" or
+        # under "playerPoolEntry.player" depending on endpoint/view.
+        rosters = {"rosters": [
+            {"id": 1, "roster": {"entries": [
+                {"player": {"id": "bare_id", "fullName": "Bare Nest"}, "lineupSlotId": 0},
+            ]}},
+            {"id": 2, "roster": {"entries": [
+                {"playerPoolEntry": {"player": {"id": "nested_id", "fullName": "Pool Nest"}},
+                 "lineupSlotId": 0},
+            ]}},
+        ]}
+        with patch("nfl_mcp.espn_fantasy_tools.get_espn_rosters",
+                   new=AsyncMock(return_value=rosters)):
+            rostered, rosters_ok = await _rostered_ids("123")
+
+        assert rosters_ok is True
+        assert rostered == {"bare_id", "nested_id"}
+
+
 class TestStreamingAvailability:
-    def test_unit_availability_dst_maps_to_team_abbrev(self):
-        free = _unit_availability("DST", "SF", rostered=set(), db=None)
-        assert free["status"] == "free_agent" and free["has_free_agent"] is True
-        taken = _unit_availability("DST", "SF", rostered={"SF"}, db=None)
-        assert taken["status"] == "rostered" and taken["has_free_agent"] is False
+    def test_unit_availability_dst_from_athletes(self):
+        db = _StubDB({}, athletes_by_team={"SF": [
+            {"id": "dst_sf", "full_name": "49ers D/ST", "position": "DST"},
+            {"id": "wr9", "full_name": "A Receiver", "position": "WR"},  # ignored for DST
+        ]})
+        free = _unit_availability("DST", "SF", rostered=set(), db=db)
+        assert free["has_free_agent"] is True
+        assert [p["name"] for p in free["players"]] == ["49ers D/ST"]
+        taken = _unit_availability("DST", "SF", rostered={"dst_sf"}, db=db)
+        assert taken["has_free_agent"] is False
+
+    def test_unit_availability_no_db_returns_no_players(self):
+        assert _unit_availability("DST", "SF", rostered=set(), db=None) == {
+            "players": [], "has_free_agent": False,
+        }
 
     def test_unit_availability_kicker_from_athletes(self):
         db = _StubDB({}, athletes_by_team={"SF": [
@@ -237,16 +270,24 @@ class TestStreamingAvailability:
     async def test_tool_annotates_and_filters_dst_availability(self):
         def_by_season = {2026: _def_rankings({"QB": [("KC", 32, False), ("SF", 1, False)]})}
         schedule = {(2026, 10, "BUF"): "KC", (2026, 10, "MIA"): "SF"}
-        analyzer = _StubAnalyzer(def_by_season, db=_StubDB(schedule))
+        db = _StubDB(schedule, athletes_by_team={
+            "BUF": [{"id": "dst_buf", "full_name": "Bills D/ST", "position": "DST"}],
+            "MIA": [{"id": "dst_mia", "full_name": "Dolphins D/ST", "position": "DST"}],
+        })
+        analyzer = _StubAnalyzer(def_by_season, db=db)
         offense = _offense({"KC": 1, "SF": 30, "BUF": 5, "MIA": 20})
 
         async def fake_offense(season):
             return offense if season == 2026 else {}
 
-        rosters = {"rosters": [{"roster_id": 1, "players": ["BUF"]}]}  # BUF DST taken, MIA free
+        # ESPN roster shape: BUF's DST is rostered (team 1), MIA's is free.
+        rosters = {"rosters": [{"id": 1, "roster": {"entries": [
+            {"player": {"id": "dst_buf", "fullName": "Bills D/ST", "defaultPositionId": 16},
+             "lineupSlotId": 16},
+        ]}}]}
         with patch("nfl_mcp.matchup_tools.get_defense_analyzer", return_value=analyzer), \
                 patch("nfl_mcp.matchup_tools.fetch_offense_rankings", side_effect=fake_offense), \
-                patch("nfl_mcp.sleeper_tools.get_rosters", new=AsyncMock(return_value=rosters)):
+                patch("nfl_mcp.espn_fantasy_tools.get_espn_rosters", new=AsyncMock(return_value=rosters)):
             annotated = await get_streaming_options(
                 season=2026, start_week=10, weeks_ahead=1, positions=["DST"], league_id="123"
             )
@@ -257,8 +298,8 @@ class TestStreamingAvailability:
 
         assert annotated["availability_active"] is True
         by_team = {r["team"]: r for r in annotated["streaming_options"]["DST"]}
-        assert by_team["MIA"]["availability"]["status"] == "free_agent"
-        assert by_team["BUF"]["availability"]["status"] == "rostered"
+        assert by_team["MIA"]["availability"]["has_free_agent"] is True
+        assert by_team["BUF"]["availability"]["has_free_agent"] is False
 
         teams = {r["team"] for r in filtered["streaming_options"]["DST"]}
         assert "MIA" in teams and "BUF" not in teams   # only_available dropped the rostered DST

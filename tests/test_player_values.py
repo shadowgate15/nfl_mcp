@@ -12,14 +12,14 @@ from nfl_mcp.database import NFLDatabase
 
 # Raw FantasyCalc-shaped entries (subset of the real schema)
 RAW_FC = [
-    {"player": {"name": "Bijan Robinson", "sleeperId": "9509", "position": "RB", "maybeTeam": "ATL"},
+    {"player": {"name": "Bijan Robinson", "espnId": "9509", "sleeperId": "4866", "position": "RB", "maybeTeam": "ATL"},
      "value": 10000, "overallRank": 1, "positionRank": 1, "redraftValue": 10000, "maybeTier": 1, "trend30Day": 50},
-    {"player": {"name": "Ja'Marr Chase", "sleeperId": "6794", "position": "WR", "maybeTeam": "CIN"},
+    {"player": {"name": "Ja'Marr Chase", "espnId": "6794", "sleeperId": "7564", "position": "WR", "maybeTeam": "CIN"},
      "value": 9500, "overallRank": 2, "positionRank": 1, "redraftValue": 9500, "maybeTier": 1, "trend30Day": 10},
-    {"player": {"name": "Patrick Mahomes", "sleeperId": "4046", "position": "QB", "maybeTeam": "KC"},
+    {"player": {"name": "Patrick Mahomes", "espnId": "4046", "sleeperId": "4046", "position": "QB", "maybeTeam": "KC"},
      "value": 4000, "overallRank": 30, "positionRank": 3, "redraftValue": 4000, "maybeTier": 4, "trend30Day": -5},
-    # Entry without a sleeperId must be dropped (cannot join to roster data)
-    {"player": {"name": "No Sleeper Id", "sleeperId": None, "position": "WR"}, "value": 100, "overallRank": 200},
+    # Entry without an espnId must be dropped (cannot join to roster data)
+    {"player": {"name": "No Espn Id", "espnId": None, "sleeperId": "1234", "position": "WR"}, "value": 100, "overallRank": 200},
 ]
 
 NORMALIZED = [n for n in (pv._normalize_fantasycalc_entry(e) for e in RAW_FC) if n]
@@ -50,12 +50,14 @@ class TestPureHelpers:
         assert pv.normalize_name("Michael Pittman Jr.") == "michael pittman"
         assert pv.normalize_name("") == ""
 
-    def test_normalize_entry_drops_without_sleeper_id(self):
-        assert pv._normalize_fantasycalc_entry(RAW_FC[3]) is None
+    def test_normalize_entry_joins_on_espn_id(self):
         norm = pv._normalize_fantasycalc_entry(RAW_FC[0])
-        assert norm["player_id"] == "9509"
+        assert norm["player_id"] == "9509"  # espnId, not the sibling sleeperId ("4866")
         assert norm["position"] == "RB"
         assert norm["source"] == "fantasycalc"
+
+    def test_normalize_entry_drops_without_espn_id(self):
+        assert pv._normalize_fantasycalc_entry(RAW_FC[3]) is None
 
 
 class TestService:
@@ -66,7 +68,7 @@ class TestService:
             data = await svc.get_values(ppr=1.0, num_qbs=1, num_teams=12, is_dynasty=False)
         assert data["source"] == "fantasycalc"
         assert data["stale"] is False
-        assert data["count"] == 3  # entry w/o sleeperId dropped
+        assert data["count"] == 3  # entry w/o espnId dropped
         # index lookups
         assert svc.lookup(data, player_id="9509")["name"] == "Bijan Robinson"
         assert svc.lookup(data, name="Ja'Marr Chase")["player_id"] == "6794"

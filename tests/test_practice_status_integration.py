@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from unittest.mock import Mock
 
-from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
 
 def test_practice_status_integration_scenario():

@@ -21,7 +21,6 @@ from nfl_mcp.tool_registry import (
     check_re_entry_status,
     compare_players_for_slot,
     crawl_url,
-    fetch_all_players,
     fetch_athletes,
     fetch_teams,
     get_all_coaching_staffs,
@@ -33,41 +32,21 @@ from nfl_mcp.tool_registry import (
     get_coaching_tree,
     get_defense_rankings,
     get_depth_chart,
-    get_draft,
-    get_draft_picks,
-    get_draft_traded_picks,
-    get_fantasy_context,
     get_game_environment,
     get_gameday_inactives,
     get_high_confidence_injuries,
     get_injury_report,
-    get_league,
-    get_league_drafts,
-    get_league_users,
     get_matchup_difficulty,
-    get_matchups,
     get_nfl_news,
     get_nfl_standings,
-    get_nfl_state,
-    get_playoff_bracket,
-    get_playoff_preparation_plan,
     get_roster_recommendations,
-    get_rosters,
     get_scheme_classification,
-    get_season_bye_week_coordination,
     get_stack_opportunities,
     get_start_sit_recommendation,
-    get_strategic_matchup_preview,
     get_team_injuries,
     get_team_player_stats,
     get_team_schedule,
     get_teams,
-    get_trade_deadline_analysis,
-    get_traded_picks,
-    get_transactions,
-    get_trending_players,
-    get_user,
-    get_user_leagues,
     get_vegas_lines,
     get_waiver_log,
     get_waiver_wire_dashboard,
@@ -95,27 +74,6 @@ def test_tool_registry_functions_exist():
     assert callable(lookup_athlete)
     assert callable(search_athletes)
     assert callable(get_athletes_by_team)
-    assert callable(get_league)
-    assert callable(get_rosters)
-    assert callable(get_league_users)
-    assert callable(get_matchups)
-    assert callable(get_playoff_bracket)
-    assert callable(get_transactions)
-    assert callable(get_traded_picks)
-    assert callable(get_nfl_state)
-    assert callable(get_trending_players)
-    assert callable(get_fantasy_context)
-    assert callable(get_strategic_matchup_preview)
-    assert callable(get_season_bye_week_coordination)
-    assert callable(get_trade_deadline_analysis)
-    assert callable(get_playoff_preparation_plan)
-    assert callable(get_user)
-    assert callable(get_user_leagues)
-    assert callable(get_league_drafts)
-    assert callable(get_draft)
-    assert callable(get_draft_picks)
-    assert callable(get_draft_traded_picks)
-    assert callable(fetch_all_players)
     assert callable(get_waiver_log)
     assert callable(check_re_entry_status)
     assert callable(get_waiver_wire_dashboard)

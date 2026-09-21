@@ -5,7 +5,6 @@ This module verifies that the NFL MCP Server correctly uses 2026 as the
 default season across all tools and properly handles season detection.
 """
 import inspect
-from unittest.mock import patch
 
 import pytest
 
@@ -69,67 +68,6 @@ class TestSeasonDefaults:
         season_param = sig.parameters['season']
         assert season_param.default == 2026,             f"Expected default season 2026, got {season_param.default}"
 
-    def test_sleeper_bye_week_coordination_default_season(self):
-        """Verify sleeper bye_week_coordination defaults to season=2026."""
-        from nfl_mcp.sleeper_tools import get_season_bye_week_coordination
-        sig = inspect.signature(get_season_bye_week_coordination)
-        season_param = sig.parameters['season']
-        assert season_param.default == 2026,             f"Expected default season 2026, got {season_param.default}"
-
-    def test_get_current_season_and_week_exists(self):
-        """Verify get_current_season_and_week function exists."""
-        from nfl_mcp.nfl_tools import get_current_season_and_week
-        assert inspect.iscoroutinefunction(get_current_season_and_week),             "get_current_season_and_week should be async"
-
-    @pytest.mark.asyncio
-    async def test_get_current_season_and_week_returns_tuple(self):
-        """Verify get_current_season_and_week returns (season, week) tuple."""
-        from nfl_mcp.nfl_tools import get_current_season_and_week
-        result = await get_current_season_and_week()
-        assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
-        assert len(result) == 2, f"Expected 2 elements, got {len(result)}"
-        season, week = result
-        assert season is None or isinstance(season, int),             f"Season should be int or None, got {type(season)}"
-        assert week is None or isinstance(week, int),             f"Week should be int or None, got {type(week)}"
-
-    @pytest.mark.asyncio
-    async def test_get_current_season_and_week_returns_2026(self):
-        """Verify get_current_season_and_week returns 2026 as current season."""
-        from nfl_mcp.nfl_tools import get_current_season_and_week
-        result = await get_current_season_and_week()
-        season, _ = result
-        assert season == 2026, f"Expected season 2026, got {season}"
-
-
-class TestSeasonFallback:
-    """Test fallback behavior when season is None."""
-
-    @pytest.mark.asyncio
-    async def test_get_current_season_and_week_handles_api_failure(self):
-        """Verify get_current_season_and_week handles API failures gracefully."""
-        # Mock the sleeper_tools import to raise an exception
-        import sys
-
-        from nfl_mcp.nfl_tools import get_current_season_and_week
-        original_module = sys.modules.get('nfl_mcp.sleeper_tools')
-        try:
-            # Remove from sys.modules to force reimport
-            if 'nfl_mcp.sleeper_tools' in sys.modules:
-                del sys.modules['nfl_mcp.sleeper_tools']
-
-            # Mock the import to raise exception
-            with patch.dict('sys.modules', {'nfl_mcp.sleeper_tools': None}):
-                # This will fail to import, but should still return fallback
-                result = await get_current_season_and_week()
-                season, _week = result
-                # Should fallback to current year when API fails
-                import datetime
-                assert season == datetime.datetime.now().year
-        finally:
-            # Restore original module
-            if original_module is not None:
-                sys.modules['nfl_mcp.sleeper_tools'] = original_module
-
 
 class TestNoHardcoded2025:
     """Verify no hardcoded 2025 values remain in critical code paths."""
@@ -173,15 +111,6 @@ class TestAPIYearAgility:
     ``--run-live``). The same guarantees are covered offline by the
     data-source contracts watchdog under ``evals/``.
     """
-
-    @pytest.mark.asyncio
-    async def test_sleeper_state_returns_2026(self):
-        """Verify Sleeper API returns 2026 as current season."""
-        import httpx
-        async with httpx.AsyncClient() as client:
-            resp = await client.get('https://api.sleeper.app/v1/state/nfl', timeout=10)
-            data = resp.json()
-            assert data.get('season') == '2026' or data.get('season') == 2026
 
     @pytest.mark.asyncio
     async def test_espn_api_accepts_2026(self):

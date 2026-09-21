@@ -204,6 +204,44 @@ class TestDatabaseMigrations:
 
         db.close()
 
+    def test_migration_v13_truncates_sleeper_keyed_stats(self):
+        """player_week_stats/player_usage_stats are truncated on cutover to ESPN player ids.
+
+        Both tables are rolling per-week caches with no historical-value
+        requirement (issue #43), so pre-cutover rows keyed on Sleeper player
+        ids are dropped rather than remapped, and the next prefetch cycle
+        repopulates them under the new id scheme.
+        """
+        # Seed a pre-v13 database (Sleeper-keyed rows) before running the migration.
+        db = NFLDatabase(self.temp_db.name)
+        with db._pool.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO player_week_stats(player_id, season, week, updated_at) "
+                "VALUES ('sleeper123', 2025, 1, '2025-01-01T00:00:00')"
+            )
+            conn.execute(
+                "INSERT INTO player_usage_stats(player_id, season, week, updated_at) "
+                "VALUES ('sleeper123', 2025, 1, '2025-01-01T00:00:00')"
+            )
+            conn.execute("DELETE FROM schema_version WHERE version = 13")
+            conn.commit()
+        db.close()
+
+        # Re-opening runs any migration above the recorded version, i.e. v13 here.
+        db = NFLDatabase(self.temp_db.name)
+        with db._pool.get_connection() as conn:
+            week_count = conn.execute("SELECT COUNT(*) FROM player_week_stats").fetchone()[0]
+            usage_count = conn.execute("SELECT COUNT(*) FROM player_usage_stats").fetchone()[0]
+            version_row = conn.execute(
+                "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
+            ).fetchone()
+
+        assert week_count == 0
+        assert usage_count == 0
+        assert version_row[0] == NFLDatabase.CURRENT_SCHEMA_VERSION
+
+        db.close()
+
 
 class TestOptimizedIndexing:
     """Test optimized indexing functionality."""

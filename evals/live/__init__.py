@@ -1,4 +1,4 @@
-"""Live integration tools you run by hand against real Sleeper data.
+"""Live integration tools you run by hand against real ESPN Fantasy data.
 
 Unlike the unit tests (mocked) and the scheduled evals, these drive the real code
 paths against a real league/draft:

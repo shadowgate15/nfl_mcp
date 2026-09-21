@@ -273,7 +273,7 @@ class TestEnhancedUrlValidation:
         """Test basic valid URLs."""
         assert validate_url_enhanced("https://example.com") is True
         assert validate_url_enhanced("http://example.com") is True
-        assert validate_url_enhanced("https://api.sleeper.app/v1/league/123") is True
+        assert validate_url_enhanced("https://api.example.com/v1/league/123") is True
 
     def test_invalid_schemes(self):
         """Test invalid URL schemes."""
@@ -298,11 +298,11 @@ class TestEnhancedUrlValidation:
 
     def test_domain_restrictions(self):
         """Test domain restrictions."""
-        allowed_domains = ["example.com", "api.sleeper.app"]
+        allowed_domains = ["example.com", "api.example.com"]
 
         assert validate_url_enhanced("https://example.com/test",
                                    allowed_domains=allowed_domains) is True
-        assert validate_url_enhanced("https://api.sleeper.app/v1/test",
+        assert validate_url_enhanced("https://api.example.com/v1/test",
                                    allowed_domains=allowed_domains) is True
         assert validate_url_enhanced("https://evil.com/test",
                                    allowed_domains=allowed_domains) is False

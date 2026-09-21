@@ -211,8 +211,7 @@ class TestOpponentAnalyzerModule:
 
         # Mock roster data
         roster = {
-            "roster_id": 2,
-            "owner_id": "user123",
+            "team_id": 2,
             "players_enriched": [
                 {
                     "player_id": "1",
@@ -280,14 +279,14 @@ class TestOpponentAnalyzerModule:
 
 
 class TestOpponentAnalysisIntegration:
-    """Test the analyze_opponent tool integration with Sleeper API."""
+    """Test the analyze_opponent tool integration with ESPN Fantasy."""
 
     @pytest.mark.asyncio
     async def test_analyze_opponent_missing_league_id(self):
         """Test analyze_opponent with missing league_id."""
         result = await opponent_analysis_tools.analyze_opponent(
             league_id="",
-            opponent_roster_id=1
+            opponent_team_id=1
         )
 
         assert result['success'] is False
@@ -295,21 +294,21 @@ class TestOpponentAnalysisIntegration:
         assert 'league_id' in result['error'].lower()
 
     @pytest.mark.asyncio
-    async def test_analyze_opponent_missing_roster_id(self):
-        """Test analyze_opponent with missing roster_id."""
+    async def test_analyze_opponent_missing_team_id(self):
+        """Test analyze_opponent with missing opponent_team_id."""
         result = await opponent_analysis_tools.analyze_opponent(
             league_id="12345",
-            opponent_roster_id=None
+            opponent_team_id=None
         )
 
         assert result['success'] is False
         assert 'error' in result
-        assert 'roster_id' in result['error'].lower()
+        assert 'opponent_team_id' in result['error'].lower()
 
     @pytest.mark.asyncio
     async def test_analyze_opponent_rosters_fetch_fails(self):
         """Test analyze_opponent when rosters fetch fails."""
-        with patch('nfl_mcp.opponent_analysis_tools.get_rosters') as mock_get_rosters:
+        with patch('nfl_mcp.opponent_analysis_tools.get_espn_rosters') as mock_get_rosters:
             mock_get_rosters.return_value = {
                 "success": False,
                 "error": "API error",
@@ -318,7 +317,7 @@ class TestOpponentAnalysisIntegration:
 
             result = await opponent_analysis_tools.analyze_opponent(
                 league_id="12345",
-                opponent_roster_id=2
+                opponent_team_id=2
             )
 
             assert result['success'] is False
@@ -326,19 +325,20 @@ class TestOpponentAnalysisIntegration:
             assert 'Failed to fetch rosters' in result['error']
 
     @pytest.mark.asyncio
-    async def test_analyze_opponent_roster_not_found(self):
-        """Test analyze_opponent when roster is not found."""
-        with patch('nfl_mcp.opponent_analysis_tools.get_rosters') as mock_get_rosters:
+    async def test_analyze_opponent_team_not_found(self):
+        """Test analyze_opponent when the team id is not found."""
+        with patch('nfl_mcp.opponent_analysis_tools.get_espn_rosters') as mock_get_rosters:
             mock_get_rosters.return_value = {
                 "success": True,
                 "rosters": [
-                    {"roster_id": 1, "players_enriched": [], "starters_enriched": []}
-                ]
+                    {"id": 1, "roster": {"entries": []}}
+                ],
+                "members": [],
             }
 
             result = await opponent_analysis_tools.analyze_opponent(
                 league_id="12345",
-                opponent_roster_id=99  # Non-existent roster
+                opponent_team_id=99  # Non-existent team
             )
 
             assert result['success'] is False
@@ -347,52 +347,29 @@ class TestOpponentAnalysisIntegration:
 
     @pytest.mark.asyncio
     async def test_analyze_opponent_successful_basic(self):
-        """Test successful opponent analysis."""
-        with patch('nfl_mcp.opponent_analysis_tools.get_rosters') as mock_get_rosters, \
-             patch('nfl_mcp.opponent_analysis_tools.get_league_users') as mock_get_users:
-
+        """Test successful opponent analysis, owner name resolved via resolve_team_owner_names."""
+        with patch('nfl_mcp.opponent_analysis_tools.get_espn_rosters') as mock_get_rosters:
             mock_get_rosters.return_value = {
                 "success": True,
                 "rosters": [
                     {
-                        "roster_id": 2,
-                        "owner_id": "user123",
-                        "players_enriched": [
-                            {
-                                "player_id": "1",
-                                "full_name": "Test QB",
-                                "position": "QB",
-                                "snap_pct": 90.0
-                            },
-                            {
-                                "player_id": "2",
-                                "full_name": "Test RB",
-                                "position": "RB",
-                                "snap_pct": 70.0
-                            }
-                        ],
-                        "starters_enriched": [
-                            {
-                                "player_id": "1",
-                                "full_name": "Test QB",
-                                "position": "QB",
-                                "snap_pct": 90.0
-                            }
-                        ]
+                        "id": 2,
+                        "owners": ["{user123}"],
+                        "primaryOwner": "{user123}",
+                        "roster": {"entries": [
+                            {"playerId": 1, "fullName": "Test QB", "defaultPositionId": 0, "lineupSlotId": 0},
+                            {"playerId": 2, "fullName": "Test RB", "defaultPositionId": 2, "lineupSlotId": 20},
+                        ]},
                     }
-                ]
-            }
-
-            mock_get_users.return_value = {
-                "success": True,
-                "users": [
-                    {"user_id": "user123", "display_name": "Opponent Team"}
-                ]
+                ],
+                "members": [
+                    {"id": "{user123}", "displayName": "Opponent Team"}
+                ],
             }
 
             result = await opponent_analysis_tools.analyze_opponent(
                 league_id="12345",
-                opponent_roster_id=2
+                opponent_team_id=2
             )
 
             assert result['success'] is True
@@ -406,53 +383,37 @@ class TestOpponentAnalysisIntegration:
     @pytest.mark.asyncio
     async def test_analyze_opponent_with_matchup_context(self):
         """Test opponent analysis with matchup context."""
-        with patch('nfl_mcp.opponent_analysis_tools.get_rosters') as mock_get_rosters, \
-             patch('nfl_mcp.opponent_analysis_tools.get_league_users') as mock_get_users, \
-             patch('nfl_mcp.opponent_analysis_tools.get_matchups') as mock_get_matchups:
+        with patch('nfl_mcp.opponent_analysis_tools.get_espn_rosters') as mock_get_rosters, \
+             patch('nfl_mcp.opponent_analysis_tools.get_espn_matchups') as mock_get_matchups:
 
             mock_get_rosters.return_value = {
                 "success": True,
                 "rosters": [
                     {
-                        "roster_id": 2,
-                        "owner_id": "user123",
-                        "players_enriched": [
-                            {
-                                "player_id": "1",
-                                "full_name": "Test Player",
-                                "position": "RB",
-                                "snap_pct": 80.0
-                            }
-                        ],
-                        "starters_enriched": [
-                            {
-                                "player_id": "1",
-                                "full_name": "Test Player",
-                                "position": "RB",
-                                "snap_pct": 80.0
-                            }
-                        ]
+                        "id": 2,
+                        "owners": [],
+                        "roster": {"entries": [
+                            {"playerId": 1, "fullName": "Test Player", "defaultPositionId": 2, "lineupSlotId": 2},
+                        ]},
                     }
-                ]
+                ],
+                "members": [],
             }
-
-            mock_get_users.return_value = {"success": True, "users": []}
 
             mock_get_matchups.return_value = {
                 "success": True,
                 "matchups": [
                     {
-                        "roster_id": 2,
-                        "matchup_id": 1,
-                        "points": 105.5,
-                        "custom_points": 110.2
+                        "id": 1,
+                        "home": {"teamId": 2, "totalPoints": 105.5},
+                        "away": {"teamId": 3, "totalPoints": 99.0},
                     }
                 ]
             }
 
             result = await opponent_analysis_tools.analyze_opponent(
                 league_id="12345",
-                opponent_roster_id=2,
+                opponent_team_id=2,
                 current_week=10
             )
 
@@ -460,6 +421,9 @@ class TestOpponentAnalysisIntegration:
             assert result['matchup_context'] is not None
             assert result['matchup_context']['week'] == 10
             assert result['matchup_context']['points'] == 105.5
+            # ESPN only exposes totalProjectedPointsLive once a week is in
+            # progress -- absent here, so this degrades to None.
+            assert result['matchup_context']['projected_points'] is None
 
 
 class TestOpponentAnalysisToolRegistry:
@@ -480,7 +444,7 @@ class TestOpponentAnalysisToolRegistry:
         from nfl_mcp.tool_registry import analyze_opponent
 
         # Test with invalid league_id (empty)
-        result = await analyze_opponent(league_id="", opponent_roster_id=1)
+        result = await analyze_opponent(league_id="", opponent_team_id=1)
         assert result['success'] is False
         assert 'error' in result
 
@@ -497,7 +461,7 @@ class TestOpponentAnalysisToolRegistry:
 
             await analyze_opponent(
                 league_id="12345",
-                opponent_roster_id=2,
+                opponent_team_id=2,
                 current_week=10
             )
 
@@ -505,5 +469,5 @@ class TestOpponentAnalysisToolRegistry:
             mock_analyze.assert_called_once()
             call_args = mock_analyze.call_args[1]
             assert call_args['league_id'] == "12345"
-            assert call_args['opponent_roster_id'] == 2
+            assert call_args['opponent_team_id'] == 2
             assert call_args['current_week'] == 10

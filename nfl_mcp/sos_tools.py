@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from . import matchup_tools, sleeper_tools
+from . import matchup_tools, nfl_enrichment
 from .errors import create_success_response, handle_http_errors, handle_validation_error
 
 logger = logging.getLogger(__name__)
@@ -144,7 +144,7 @@ async def _gather_opponents(db, season: int, weeks: list[int]) -> dict[str, dict
                     week_map[team] = opp
         if not week_map:
             # Cache miss for this week: fetch from ESPN (force past the enrich gate).
-            fetched = await sleeper_tools._fetch_week_schedule(season, wk, force=True)
+            fetched = await nfl_enrichment._fetch_week_schedule(season, wk, force=True)
             if fetched and db:
                 try:
                     db.upsert_schedule_games(fetched)  # warm the cache

@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from nfl_mcp.sleeper_tools import _enrich_usage_and_opponent
+from nfl_mcp.nfl_enrichment import _enrich_usage_and_opponent
 
 
 class TestPracticeStatusEnrichment:

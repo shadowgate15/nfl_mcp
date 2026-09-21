@@ -1,8 +1,8 @@
 """
 SQLite database management for NFL athletes and teams data.
 
-This module handles the persistence layer for athlete information fetched from
-the Sleeper API and teams information from ESPN API, providing caching and lookup functionality.
+This module handles the persistence layer for athlete and teams information,
+both fetched from ESPN's API, providing caching and lookup functionality.
 Features connection pooling, health checks, optimized indexing, migration support, and async operations.
 """
 
@@ -189,7 +189,7 @@ class NFLDatabase:
     """SQLite database manager for NFL athlete and teams data with caching and lookup functionality."""
 
     # Database schema version for migrations
-    CURRENT_SCHEMA_VERSION = 12
+    CURRENT_SCHEMA_VERSION = 13
 
     def __init__(self, db_path: str | None = None, pool_config: ConnectionPoolConfig | None = None):
         """
@@ -248,6 +248,7 @@ class NFLDatabase:
             10: self._migration_v10_defense_rankings,
             11: self._migration_v11_injuries_v2,
             12: self._migration_v12_player_values,
+            13: self._migration_v13_truncate_sleeper_keyed_stats,
         }
 
         for version in range(from_version + 1, self.CURRENT_SCHEMA_VERSION + 1):
@@ -633,6 +634,17 @@ class NFLDatabase:
             """CREATE INDEX IF NOT EXISTS idx_player_values_pos
                ON player_values(format_key, position, position_rank ASC)"""
         )
+
+    def _migration_v13_truncate_sleeper_keyed_stats(self, conn: sqlite3.Connection) -> None:
+        """Migration v13: Cut player_week_stats/player_usage_stats over to ESPN player ids.
+
+        Both tables are rolling per-week caches (`PRIMARY KEY (player_id, season, week)`)
+        with no historical-value requirement, so the athlete-identity cutover to ESPN
+        player ids (issue #43) truncates them here instead of remapping rows in place —
+        the next prefetch cycle repopulates them under the new id scheme.
+        """
+        conn.execute("DELETE FROM player_week_stats")
+        conn.execute("DELETE FROM player_usage_stats")
 
     @contextmanager
     def _get_connection(self):
@@ -1933,7 +1945,7 @@ class NFLDatabase:
         Async version: Insert or update athlete records.
 
         Args:
-            athletes_data: List of athlete dictionaries from Sleeper API
+            athletes_data: Dict of athlete_id -> athlete dictionary, sourced from ESPN's player pool
 
         Returns:
             Number of athletes processed
@@ -2064,7 +2076,7 @@ class NFLDatabase:
         Insert or update athlete records.
 
         Args:
-            athletes_data: List of athlete dictionaries from Sleeper API
+            athletes_data: Dict of athlete_id -> athlete dictionary, sourced from ESPN's player pool
 
         Returns:
             Number of athletes processed

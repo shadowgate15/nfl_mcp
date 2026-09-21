@@ -21,12 +21,16 @@ Covers get_espn_players (no cookies, `/players` endpoint, catalog §7b):
   normalize to the same output shape
 - no ESPN_S2/ESPN_SWID needed
 - HTTP error path
+- limit/offset pagination: default-limit slicing, explicit limit/offset,
+  has_more boundary correctness, and the 150 KB hard size cap (ADR 0006)
 
 Covers get_espn_free_agents (cookie-gated, `kona_player_info` view, catalog
 §7a):
 - success path, including the x-fantasy-filter header and scoringPeriodId
 - missing-credentials short-circuit
 - HTTP error path
+- limit/offset pagination: default-limit slicing, explicit limit/offset,
+  has_more boundary correctness, and the 150 KB hard size cap (ADR 0006)
 
 Covers get_espn_rosters:
 - success path on the 2018+ object-wrapped envelope, with a week passed
@@ -34,6 +38,29 @@ Covers get_espn_rosters:
 - success path on the pre-2018 leagueHistory array-wrapped envelope
 - missing-credentials short-circuit
 - registration in tool_registry.get_all_tools()
+- the league response's top-level members[] is surfaced undiscarded,
+  defaulting to [] when absent (issue #44)
+
+Covers _extract_player, the shared roster-entry player-extraction helper
+(issue #44): both of ESPN's player-nesting shapes
+(playerPoolEntry.player vs. a bare player), and a missing player
+returning {} rather than raising.
+
+Covers resolve_team_owner_names, the shared owners-id-to-members-id join
+(issue #44, ADR 0005/0007): resolution via primaryOwner, a co-manager
+team resolving to just the primary owner's name (not a list), falling
+back to the first owners[] entry when primaryOwner is absent, falling
+back to firstName/lastName when displayName is absent, omitting teams
+whose owner id has no matching member or that have no owners at all,
+and resolving multiple teams in rosters[] independently.
+
+Covers enrich_roster_entries, the shared roster-entry-to-enriched-player
+helper (issue #45, ADR 0007): both of ESPN's player-nesting shapes via
+_extract_player, joining a cached player id against player_cache for
+name/team/position, falling back to the raw ESPN player's own fullName
+and defaultPositionId (via POSITION_ID_MAP) for a player id missing from
+the cache, and preserving lineupSlotId/entries order across multiple
+entries.
 
 Covers get_espn_standings:
 - sort/tiebreak derivation from teams[] (rankFinal, then
@@ -80,6 +107,9 @@ import pytest
 from nfl_mcp.errors import ErrorType
 from nfl_mcp.espn_errors import classify_espn_auth_error
 from nfl_mcp.espn_fantasy_tools import (
+    POSITION_ID_MAP,
+    _extract_player,
+    enrich_roster_entries,
     get_espn_draft,
     get_espn_free_agents,
     get_espn_league,
@@ -91,6 +121,7 @@ from nfl_mcp.espn_fantasy_tools import (
     get_espn_standings,
     get_espn_transactions,
     handle_espn_auth_errors,
+    resolve_team_owner_names,
 )
 
 
@@ -415,6 +446,104 @@ class TestGetEspnPlayers:
         tool_names = [t.__name__ for t in get_all_tools()]
         assert "get_espn_players" in tool_names
 
+    @pytest.mark.asyncio
+    async def test_default_limit_pages_the_pool(self, monkeypatch):
+        """With no limit/offset given, only the first 25 players are returned."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": i, "fullName": f"Player {i}"} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players()
+
+        assert result["success"] is True
+        assert len(result["players"]) == 25
+        assert result["players"] == raw_players[:25]
+        assert result["total_players"] == 40
+        assert result["has_more"] is True
+
+    @pytest.mark.asyncio
+    async def test_explicit_limit_and_offset(self, monkeypatch):
+        """An explicit limit/offset selects the corresponding slice."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": i, "fullName": f"Player {i}"} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players(limit=10, offset=30)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players[30:40]
+        assert result["total_players"] == 40
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_has_more_false_at_exact_boundary(self, monkeypatch):
+        """offset+limit landing exactly on the total leaves has_more False."""
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": i} for i in range(10)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players(limit=5, offset=5)
+
+        assert result["players"] == raw_players[5:10]
+        assert result["has_more"] is False
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players(limit=5, offset=4)
+
+        assert result["players"] == raw_players[4:9]
+        assert result["has_more"] is True
+
+    @pytest.mark.asyncio
+    async def test_response_stays_within_hard_size_cap(self, monkeypatch):
+        """Even a large max-limit page is trimmed to stay under the 150 KB hard cap."""
+        import json
+
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        # Each entry is padded to be much heavier than a realistic bio-only
+        # /players entry, to stress the size-based trimming safety net
+        # independent of any particular byte-per-player estimate.
+        raw_players = [
+            {"id": i, "fullName": f"Player {i}", "blob": "x" * 5000}
+            for i in range(200)
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_players(limit=100, offset=0)
+
+        assert result["success"] is True
+        assert len(json.dumps(result["players"])) <= 150 * 1024
+        assert result["total_players"] == 200
+        assert result["has_more"] is True
+        assert len(result["players"]) < 100
+
 
 class TestGetEspnFreeAgents:
     """Test get_espn_free_agents, the cookie-gated league-scoped free-agent tool."""
@@ -530,6 +659,103 @@ class TestGetEspnFreeAgents:
 
         tool_names = [t.__name__ for t in get_all_tools()]
         assert "get_espn_free_agents" in tool_names
+
+    @pytest.mark.asyncio
+    async def test_default_limit_pages_the_free_agent_list(self, monkeypatch):
+        """With no limit/offset given, only the first 25 free agents are returned."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        raw_players = [{"id": i, "player": {"fullName": f"FA {i}"}} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players[:25]
+        assert result["total_free_agents"] == 40
+        assert result["has_more"] is True
+
+    @pytest.mark.asyncio
+    async def test_explicit_limit_and_offset(self, monkeypatch):
+        """An explicit limit/offset selects the corresponding slice."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        raw_players = [{"id": i, "player": {"fullName": f"FA {i}"}} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023, limit=10, offset=30)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players[30:40]
+        assert result["total_free_agents"] == 40
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_has_more_false_at_exact_boundary(self, monkeypatch):
+        """offset+limit landing exactly on the total leaves has_more False."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        raw_players = [{"id": i} for i in range(10)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023, limit=5, offset=5)
+
+        assert result["players"] == raw_players[5:10]
+        assert result["has_more"] is False
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023, limit=5, offset=4)
+
+        assert result["players"] == raw_players[4:9]
+        assert result["has_more"] is True
+
+    @pytest.mark.asyncio
+    async def test_response_stays_within_hard_size_cap(self, monkeypatch):
+        """Even a large max-limit page is trimmed to stay under the 150 KB hard cap."""
+        import json
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        # Free-agent entries carry a full nested Player (incl. stats[]),
+        # heavier than a bio-only /players entry (ADR 0006) - padded here to
+        # stress the size-based trimming safety net directly.
+        raw_players = [
+            {"id": i, "player": {"fullName": f"FA {i}"}, "blob": "x" * 5000}
+            for i in range(200)
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_free_agents("1234", year=2023, limit=100, offset=0)
+
+        assert result["success"] is True
+        assert len(json.dumps(result["players"])) <= 150 * 1024
+        assert result["total_free_agents"] == 200
+        assert result["has_more"] is True
+        assert len(result["players"]) < 100
 
 
 class TestGetEspnRosters:
@@ -654,6 +880,7 @@ class TestGetEspnRosters:
         assert result["success"] is False
         assert result["error_type"] == ErrorType.HTTP
         assert result["rosters"] == []
+        assert result["members"] == []
 
     def test_registered_in_tool_registry(self):
         """get_espn_rosters is present in tool_registry.get_all_tools()."""
@@ -661,6 +888,363 @@ class TestGetEspnRosters:
 
         tool_names = [t.__name__ for t in get_all_tools()]
         assert "get_espn_rosters" in tool_names
+
+    def _roster_entry(self, player_id, applied_total=12.5):
+        return {
+            "lineupSlotId": 2,
+            "playerPoolEntry": {
+                "player": {
+                    "id": player_id,
+                    "fullName": f"Player {player_id}",
+                    "defaultPositionId": 3,
+                    "proTeamId": 7,
+                    "injuryStatus": "ACTIVE",
+                    "ownership": {"percentOwned": 55.5},
+                    "stats": [
+                        {"statSourceId": 1, "appliedTotal": 20.0},
+                        {"statSourceId": 0, "appliedTotal": applied_total},
+                    ],
+                }
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_default_detail_is_summary(self, monkeypatch):
+        """With no `detail` given, roster entries are trimmed to the summary allowlist."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        league_object = {
+            "teams": [{"id": 1, "roster": {"entries": [self._roster_entry(101)]}}],
+        }
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = league_object
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_rosters("1234", year=2018)
+
+        assert result["success"] is True
+        entries = result["rosters"][0]["roster"]["entries"]
+        assert entries == [{
+            "playerId": 101,
+            "fullName": "Player 101",
+            "defaultPositionId": 3,
+            "proTeamId": 7,
+            "lineupSlotId": 2,
+            "injuryStatus": "ACTIVE",
+            "appliedTotal": 12.5,
+        }]
+
+    @pytest.mark.asyncio
+    async def test_detail_full_returns_entries_unfiltered(self, monkeypatch):
+        """With detail="full", roster entries pass through unmodified."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        raw_entry = self._roster_entry(101)
+        league_object = {"teams": [{"id": 1, "roster": {"entries": [raw_entry]}}]}
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = league_object
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_rosters("1234", year=2018, detail="full")
+
+        assert result["success"] is True
+        assert result["rosters"] == league_object["teams"]
+
+    @pytest.mark.asyncio
+    async def test_registry_rejects_invalid_detail(self):
+        """tool_registry.get_espn_rosters rejects an unrecognized `detail` value."""
+        from nfl_mcp.tool_registry import get_espn_rosters as registry_get_espn_rosters
+
+        result = await registry_get_espn_rosters("1234", detail="verbose")
+
+        assert result["success"] is False
+        assert result["rosters"] == []
+
+    @pytest.mark.asyncio
+    async def test_total_teams_and_has_more_under_cap(self, monkeypatch):
+        """A response well under the hard cap reports total_teams and has_more=False."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        league_object = {
+            "teams": [
+                {"id": 1, "roster": {"entries": [self._roster_entry(101)]}},
+                {"id": 2, "roster": {"entries": [self._roster_entry(102)]}},
+            ],
+        }
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = league_object
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_rosters("1234", year=2018)
+
+        assert result["success"] is True
+        assert result["total_teams"] == 2
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_response_stays_within_hard_size_cap(self, monkeypatch):
+        """A large `detail="full"` roster response is trimmed to stay under the
+        150 KB hard cap (ADR 0006), with has_more surfacing the truncation."""
+        import json
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        def heavy_team(team_id):
+            entries = [
+                {
+                    "lineupSlotId": 2,
+                    "playerPoolEntry": {
+                        "player": {
+                            "id": team_id * 100 + i,
+                            "fullName": f"Player {team_id}-{i}",
+                            "blob": "x" * 2000,
+                        }
+                    },
+                }
+                for i in range(25)
+            ]
+            return {"id": team_id, "roster": {"entries": entries}}
+
+        league_object = {"teams": [heavy_team(t) for t in range(16)]}
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = league_object
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_rosters("1234", year=2018, detail="full")
+
+        assert result["success"] is True
+        assert len(json.dumps(result["rosters"])) <= 150 * 1024
+        assert result["total_teams"] == 16
+        assert result["has_more"] is True
+        assert len(result["rosters"]) < 16
+
+    @pytest.mark.asyncio
+    async def test_members_surfaced_alongside_rosters(self, monkeypatch):
+        """The league response's top-level `members[]` is returned undiscarded."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        members = [{"id": "{abc}", "displayName": "someuser", "firstName": "Some", "lastName": "User"}]
+        league_object = {"teams": [{"id": 1, "roster": {"entries": []}}], "members": members}
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = league_object
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_rosters("1234", year=2018)
+
+        assert result["success"] is True
+        assert result["members"] == members
+
+    @pytest.mark.asyncio
+    async def test_members_defaults_to_empty_list_when_absent(self, monkeypatch):
+        """A league response with no `members` key surfaces `members: []`, not a KeyError."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"teams": []}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_rosters("1234", year=2018)
+
+        assert result["success"] is True
+        assert result["members"] == []
+
+
+class TestExtractPlayer:
+    """Test _extract_player, the shared roster-entry player extraction helper."""
+
+    def test_nested_under_player_pool_entry(self):
+        """The `playerPoolEntry.player` nesting (e.g. free-agent/matchup box-score entries)."""
+        entry = {"lineupSlotId": 2, "playerPoolEntry": {"player": {"id": 101, "fullName": "Nested Guy"}}}
+
+        assert _extract_player(entry) == {"id": 101, "fullName": "Nested Guy"}
+
+    def test_bare_player(self):
+        """The bare `player` nesting (e.g. some roster views)."""
+        entry = {"lineupSlotId": 2, "player": {"id": 202, "fullName": "Bare Guy"}}
+
+        assert _extract_player(entry) == {"id": 202, "fullName": "Bare Guy"}
+
+    def test_missing_player_returns_empty_dict(self):
+        """An entry with neither nesting returns {} rather than raising."""
+        assert _extract_player({"lineupSlotId": 2}) == {}
+
+
+class TestResolveTeamOwnerNames:
+    """Test resolve_team_owner_names, the shared owners-id-to-members-id join (ADR 0005/0007)."""
+
+    def test_resolves_via_primary_owner(self):
+        """A team's primaryOwner id resolves to that member's displayName."""
+        rosters = [{"id": 1, "owners": ["{owner-1}"], "primaryOwner": "{owner-1}"}]
+        members = [{"id": "{owner-1}", "displayName": "someuser", "firstName": "Some", "lastName": "User"}]
+
+        assert resolve_team_owner_names(rosters, members) == {1: "someuser"}
+
+    def test_co_managers_resolve_to_primary_owner_only(self):
+        """A team with multiple owners (co-managers) resolves to just the primaryOwner's name,
+        not a list — no current caller consumes a co-manager list (issue #44)."""
+        rosters = [{
+            "id": 1,
+            "owners": ["{owner-1}", "{owner-2}"],
+            "primaryOwner": "{owner-2}",
+        }]
+        members = [
+            {"id": "{owner-1}", "displayName": "first-owner"},
+            {"id": "{owner-2}", "displayName": "second-owner"},
+        ]
+
+        assert resolve_team_owner_names(rosters, members) == {1: "second-owner"}
+
+    def test_falls_back_to_first_owner_when_primary_owner_missing(self):
+        """With no primaryOwner, the first entry in owners[] is used instead."""
+        rosters = [{"id": 1, "owners": ["{owner-1}"]}]
+        members = [{"id": "{owner-1}", "displayName": "someuser"}]
+
+        assert resolve_team_owner_names(rosters, members) == {1: "someuser"}
+
+    def test_falls_back_to_first_and_last_name_when_display_name_missing(self):
+        """A member with no displayName resolves to "firstName lastName" instead."""
+        rosters = [{"id": 1, "owners": ["{owner-1}"], "primaryOwner": "{owner-1}"}]
+        members = [{"id": "{owner-1}", "firstName": "Some", "lastName": "User"}]
+
+        assert resolve_team_owner_names(rosters, members) == {1: "Some User"}
+
+    def test_unresolvable_owner_is_omitted(self):
+        """A team whose owner id has no matching member is left out of the mapping."""
+        rosters = [{"id": 1, "owners": ["{unknown}"], "primaryOwner": "{unknown}"}]
+
+        assert resolve_team_owner_names(rosters, members=[]) == {}
+
+    def test_team_with_no_owners_is_omitted(self):
+        """A team with neither owners nor primaryOwner is left out of the mapping."""
+        rosters = [{"id": 1}]
+        members = [{"id": "{owner-1}", "displayName": "someuser"}]
+
+        assert resolve_team_owner_names(rosters, members) == {}
+
+    def test_multiple_teams(self):
+        """Each team in rosters[] resolves independently."""
+        rosters = [
+            {"id": 1, "owners": ["{owner-1}"], "primaryOwner": "{owner-1}"},
+            {"id": 2, "owners": ["{owner-2}"], "primaryOwner": "{owner-2}"},
+        ]
+        members = [
+            {"id": "{owner-1}", "displayName": "first-team-owner"},
+            {"id": "{owner-2}", "displayName": "second-team-owner"},
+        ]
+
+        assert resolve_team_owner_names(rosters, members) == {
+            1: "first-team-owner",
+            2: "second-team-owner",
+        }
+
+
+class TestEnrichRosterEntries:
+    """Test enrich_roster_entries, the shared roster-entry-to-enriched-player join (ADR 0007)."""
+
+    def test_joins_bare_player_against_cache(self):
+        """A bare `entry["player"]` nesting joins against player_cache by id."""
+        entries = [{"player": {"id": 4429795, "fullName": "Raw Name", "defaultPositionId": 2}, "lineupSlotId": 2}]
+        player_cache = {"4429795": {"full_name": "Cached Name", "team": "SF", "position": "RB", "status": "Active"}}
+
+        assert enrich_roster_entries(entries, player_cache) == [{
+            "player_id": 4429795,
+            "full_name": "Cached Name",
+            "position": "RB",
+            "team": "SF",
+            "lineup_slot_id": 2,
+        }]
+
+    def test_joins_playerpoolentry_nested_player_against_cache(self):
+        """A `playerPoolEntry.player` nesting also joins against player_cache by id."""
+        entries = [{
+            "playerPoolEntry": {"player": {"id": 101, "fullName": "Raw Name", "defaultPositionId": 6}},
+            "lineupSlotId": 6,
+        }]
+        player_cache = {"101": {"full_name": "Cached TE", "team": "KC", "position": "TE", "status": "Active"}}
+
+        assert enrich_roster_entries(entries, player_cache) == [{
+            "player_id": 101,
+            "full_name": "Cached TE",
+            "position": "TE",
+            "team": "KC",
+            "lineup_slot_id": 6,
+        }]
+
+    def test_player_missing_from_cache_falls_back_to_raw_espn_fields(self):
+        """A player id absent from player_cache still produces an entry, using the raw
+        ESPN player's own fullName/defaultPositionId (via POSITION_ID_MAP) instead of
+        being dropped."""
+        entries = [{"player": {"id": 999, "fullName": "Uncached Guy", "defaultPositionId": 16}, "lineupSlotId": 20}]
+
+        result = enrich_roster_entries(entries, player_cache={})
+
+        assert result == [{
+            "player_id": 999,
+            "full_name": "Uncached Guy",
+            "position": "DST",
+            "team": "",
+            "lineup_slot_id": 20,
+        }]
+        assert POSITION_ID_MAP[16] == "DST"
+
+    def test_multiple_entries_preserve_order(self):
+        """Enriched dicts come back in the same order as the input entries."""
+        entries = [
+            {"player": {"id": 1, "fullName": "First"}, "lineupSlotId": 0},
+            {"player": {"id": 2, "fullName": "Second"}, "lineupSlotId": 1},
+        ]
+        player_cache = {
+            "1": {"full_name": "First Cached", "team": "SF", "position": "QB", "status": "Active"},
+            "2": {"full_name": "Second Cached", "team": "KC", "position": "WR", "status": "Active"},
+        }
+
+        result = enrich_roster_entries(entries, player_cache)
+
+        assert [p["player_id"] for p in result] == [1, 2]
+        assert [p["full_name"] for p in result] == ["First Cached", "Second Cached"]
+
+    def test_empty_entries_returns_empty_list(self):
+        assert enrich_roster_entries([], player_cache={}) == []
+
+    def test_cached_entry_with_blank_position_falls_back_to_raw_espn_field(self):
+        """A cached entry present but missing `position` still falls back to
+        POSITION_ID_MAP, per field, rather than surfacing a blank value."""
+        entries = [{"player": {"id": 5, "fullName": "Raw Name", "defaultPositionId": 17}, "lineupSlotId": 17}]
+        player_cache = {"5": {"full_name": "", "team": "KC", "position": "", "status": "Active"}}
+
+        result = enrich_roster_entries(entries, player_cache)
+
+        assert result == [{
+            "player_id": 5,
+            "full_name": "Raw Name",
+            "position": "K",
+            "team": "KC",
+            "lineup_slot_id": 17,
+        }]
 
 
 class TestGetEspnStandings:
@@ -870,6 +1454,82 @@ class TestGetEspnScoreboard:
         tool_names = [t.__name__ for t in get_all_tools()]
         assert "get_espn_scoreboard" in tool_names
 
+    @pytest.mark.asyncio
+    async def test_week_omitted_caps_to_most_recent_weeks(self, monkeypatch):
+        """With no `week`, a season longer than the cap is trimmed to the most
+        recent weeks up to the league's current scoring period, with
+        total_weeks/has_more surfacing the truncation (ADR 0006)."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [
+            {"id": w, "matchupPeriodId": w, "home": {"teamId": 1}, "away": {"teamId": 2}}
+            for w in range(1, 8)
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": 6}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_scoreboard("1234", year=2018)
+
+        assert result["success"] is True
+        assert result["total_weeks"] == 7
+        assert result["has_more"] is True
+        returned_weeks = sorted(m["matchupPeriodId"] for m in result["scoreboard"])
+        assert returned_weeks == [4, 5, 6]
+
+    @pytest.mark.asyncio
+    async def test_week_omitted_under_cap_returns_everything(self, monkeypatch):
+        """A season with fewer weeks than the cap is returned in full, has_more False."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [
+            {"id": w, "matchupPeriodId": w, "home": {"teamId": 1}, "away": {"teamId": 2}}
+            for w in range(1, 3)
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": 2}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_scoreboard("1234", year=2018)
+
+        assert result["scoreboard"] == schedule
+        assert result["total_weeks"] == 2
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_week_capping_boundary_exact_cap_returns_everything(self, monkeypatch):
+        """A season with exactly `_MAX_WEEKS_UNSCOPED` weeks is returned in
+        full — the boundary between "under cap" and "over cap"."""
+        from nfl_mcp.espn_fantasy_tools import _MAX_WEEKS_UNSCOPED
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [
+            {"id": w, "matchupPeriodId": w, "home": {"teamId": 1}, "away": {"teamId": 2}}
+            for w in range(1, _MAX_WEEKS_UNSCOPED + 1)
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": _MAX_WEEKS_UNSCOPED}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_scoreboard("1234", year=2018)
+
+        assert result["scoreboard"] == schedule
+        assert result["total_weeks"] == _MAX_WEEKS_UNSCOPED
+        assert result["has_more"] is False
+
 
 class TestGetEspnMatchups:
     """Test get_espn_matchups: full box-score/lineup detail (mMatchup+mScoreboard)."""
@@ -973,6 +1633,222 @@ class TestGetEspnMatchups:
 
         tool_names = [t.__name__ for t in get_all_tools()]
         assert "get_espn_matchups" in tool_names
+
+    def _box_score_entry(self, player_id):
+        return {
+            "lineupSlotId": 4,
+            "playerPoolEntry": {
+                "player": {
+                    "id": player_id,
+                    "fullName": f"Player {player_id}",
+                    "defaultPositionId": 2,
+                    "proTeamId": 9,
+                    "injuryStatus": "ACTIVE",
+                    "ownership": {"percentOwned": 80.0},
+                    "stats": [{"statSourceId": 0, "appliedTotal": 15.5}],
+                }
+            },
+        }
+
+    def _matchup(self, matchup_period_id, roster_size=2):
+        entries = [self._box_score_entry(pid) for pid in range(roster_size)]
+        return {
+            "id": matchup_period_id,
+            "matchupPeriodId": matchup_period_id,
+            "home": {"teamId": 1, "totalPoints": 100.0,
+                      "rosterForCurrentScoringPeriod": {"entries": entries}},
+            "away": {"teamId": 2, "totalPoints": 90.0,
+                      "rosterForCurrentScoringPeriod": {"entries": entries}},
+        }
+
+    @pytest.mark.asyncio
+    async def test_week_omitted_caps_to_most_recent_weeks(self, monkeypatch):
+        """With no `week`, a season longer than the cap is trimmed to the most
+        recent weeks up to the league's current scoring period, with
+        total_weeks/has_more surfacing the truncation (ADR 0006)."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [self._matchup(w) for w in range(1, 8)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": 6}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", year=2018)
+
+        assert result["success"] is True
+        assert result["total_weeks"] == 7
+        assert result["has_more"] is True
+        returned_weeks = sorted(m["matchupPeriodId"] for m in result["matchups"])
+        assert returned_weeks == [4, 5, 6]
+
+    @pytest.mark.asyncio
+    async def test_week_capping_boundary_exact_cap_returns_everything(self, monkeypatch):
+        """A season with exactly `_MAX_WEEKS_UNSCOPED` weeks is returned in
+        full — the boundary between "under cap" and "over cap"."""
+        from nfl_mcp.espn_fantasy_tools import _MAX_WEEKS_UNSCOPED
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [self._matchup(w) for w in range(1, _MAX_WEEKS_UNSCOPED + 1)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": _MAX_WEEKS_UNSCOPED}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", year=2018, detail="full")
+
+        assert result["matchups"] == schedule
+        assert result["total_weeks"] == _MAX_WEEKS_UNSCOPED
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_week_given_total_weeks_reflects_server_scoped_fetch(self, monkeypatch):
+        """When `week` is given, ESPN's x-fantasy-filter already narrows the
+        fetch server-side, so total_weeks reflects just the requested period
+        (1), not a season-wide count — unlike get_espn_scoreboard, which
+        never sends that header."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [self._matchup(5, roster_size=1)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": 5}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", week=5, year=2018)
+
+        assert result["total_weeks"] == 1
+        assert result["has_more"] is False
+
+    @pytest.mark.asyncio
+    async def test_default_detail_trims_box_score_entries(self, monkeypatch):
+        """With no `detail` given, each side's box-score roster entries are
+        trimmed to the summary allowlist."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [self._matchup(1, roster_size=1)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": 1}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", week=1, year=2018)
+
+        home_entries = result["matchups"][0]["home"]["rosterForCurrentScoringPeriod"]["entries"]
+        assert home_entries == [{
+            "playerId": 0,
+            "fullName": "Player 0",
+            "defaultPositionId": 2,
+            "proTeamId": 9,
+            "lineupSlotId": 4,
+            "injuryStatus": "ACTIVE",
+            "appliedTotal": 15.5,
+        }]
+        # Untouched fields survive summary trimming.
+        assert result["matchups"][0]["home"]["totalPoints"] == 100.0
+
+    @pytest.mark.asyncio
+    async def test_detail_full_returns_box_score_entries_unfiltered(self, monkeypatch):
+        """With detail="full", box-score roster entries pass through unmodified."""
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        schedule = [self._matchup(1, roster_size=1)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": 1}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", week=1, year=2018, detail="full")
+
+        assert result["matchups"] == schedule
+
+    @pytest.mark.asyncio
+    async def test_registry_rejects_invalid_detail(self):
+        """tool_registry.get_espn_matchups rejects an unrecognized `detail` value."""
+        from nfl_mcp.tool_registry import get_espn_matchups as registry_get_espn_matchups
+
+        result = await registry_get_espn_matchups("1234", detail="verbose")
+
+        assert result["success"] is False
+        assert result["matchups"] == []
+
+    @pytest.mark.asyncio
+    async def test_full_season_box_score_worst_case_stays_within_hard_cap(self, monkeypatch):
+        """A full-season, box-score-mode, `detail="full"` worst case — many weeks,
+        many players, heavy per-player payloads — still stays within the 150 KB
+        hard cap (ADR 0006), via the week cap plus the size-shrink safety net."""
+        import json
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        def heavy_entry(player_id):
+            return {
+                "lineupSlotId": 4,
+                "playerPoolEntry": {
+                    "player": {
+                        "id": player_id,
+                        "fullName": f"Player {player_id}",
+                        "defaultPositionId": 2,
+                        "proTeamId": 9,
+                        "injuryStatus": "ACTIVE",
+                        "ownership": {"percentOwned": 80.0, "percentStarted": 70.0},
+                        "stats": [
+                            {"statSourceId": 0, "appliedTotal": 15.5,
+                             "stats": {str(i): float(i) for i in range(30)}}
+                        ],
+                    }
+                },
+            }
+
+        def heavy_matchup(matchup_period_id, matchup_id):
+            entries = [heavy_entry(pid) for pid in range(20)]
+            return {
+                "id": matchup_id,
+                "matchupPeriodId": matchup_period_id,
+                "home": {"teamId": matchup_id, "totalPoints": 100.0,
+                          "rosterForCurrentScoringPeriod": {"entries": entries}},
+                "away": {"teamId": matchup_id + 100, "totalPoints": 90.0,
+                          "rosterForCurrentScoringPeriod": {"entries": entries}},
+            }
+
+        # 17 weeks x 8 matchups/week (16 teams) x 20-player rosters/side - the
+        # full-season/box-score worst case the response-size research flagged
+        # as the single biggest offender.
+        schedule = [
+            heavy_matchup(week, week * 100 + i)
+            for week in range(1, 18)
+            for i in range(8)
+        ]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"schedule": schedule, "scoringPeriodId": 10}
+
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await get_espn_matchups("1234", year=2018, detail="full")
+
+        assert result["success"] is True
+        assert len(json.dumps(result["matchups"])) <= 150 * 1024
+        assert result["total_weeks"] == 17
+        assert result["has_more"] is True
 
 
 class TestGetEspnDraft:
@@ -1465,6 +2341,81 @@ class TestGetEspnPlayerNews:
         assert result["success"] is True
         assert result["total_news"] == 1
         assert client.get.call_count == 2
+
+
+class TestEspnPlayersFreeAgentsRegistryValidation:
+    """Test the tool_registry.py wrappers' limit/offset validation for both tools."""
+
+    @pytest.mark.asyncio
+    async def test_get_espn_players_out_of_range_limit_snaps_to_default(self, monkeypatch):
+        """A limit outside 1-100 snaps to the default of 25 (validate_limit's semantics)."""
+        from nfl_mcp.tool_registry import get_espn_players as registry_get_espn_players
+
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": i} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await registry_get_espn_players(limit=1000)
+
+        assert result["success"] is True
+        assert len(result["players"]) == 25
+
+    @pytest.mark.asyncio
+    async def test_get_espn_players_negative_offset_clamps_to_zero(self, monkeypatch):
+        """A negative offset clamps to 0 rather than erroring."""
+        from nfl_mcp.tool_registry import get_espn_players as registry_get_espn_players
+
+        monkeypatch.delenv("ESPN_S2", raising=False)
+        monkeypatch.delenv("ESPN_SWID", raising=False)
+
+        raw_players = [{"id": i} for i in range(5)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = raw_players
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await registry_get_espn_players(limit=5, offset=-10)
+
+        assert result["success"] is True
+        assert result["players"] == raw_players[:5]
+
+    @pytest.mark.asyncio
+    async def test_get_espn_free_agents_out_of_range_limit_snaps_to_default(self, monkeypatch):
+        """A limit outside 1-100 snaps to the default of 25 (validate_limit's semantics)."""
+        from nfl_mcp.tool_registry import get_espn_free_agents as registry_get_espn_free_agents
+
+        monkeypatch.setenv("ESPN_S2", "some-cookie")
+        monkeypatch.setenv("ESPN_SWID", "some-swid")
+
+        raw_players = [{"id": i} for i in range(40)]
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"players": raw_players}
+        mock_client = _mock_http_client(mock_response)
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client", return_value=mock_client):
+            result = await registry_get_espn_free_agents("1234", limit=0)
+
+        assert result["success"] is True
+        assert len(result["players"]) == 25
+
+    @pytest.mark.asyncio
+    async def test_get_espn_free_agents_invalid_league_id_returns_error(self):
+        """An invalid league_id short-circuits with a validation error, no HTTP call made."""
+        from nfl_mcp.tool_registry import get_espn_free_agents as registry_get_espn_free_agents
+
+        with patch("nfl_mcp.espn_fantasy_tools.create_http_client") as mock_create_client:
+            result = await registry_get_espn_free_agents("x" * 100)
+
+        mock_create_client.assert_not_called()
+        assert result["success"] is False
 
 
 class TestEspnFantasyToolRegistryIntegration:

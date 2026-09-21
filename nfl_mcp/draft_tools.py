@@ -7,10 +7,10 @@ edge:
 - get_draft_board: a format-aware, tiered board ranked by Value-Based Drafting
   (VBD = value over positional replacement level), which is what actually wins
   drafts — not raw ADP.
-- recommend_draft_pick: a LIVE in-draft assistant. It reads the current Sleeper
-  draft state (who's already gone), models your roster construction and starter
-  needs, detects positional runs and value cliffs, and tells you the best picks
-  right now with reasoning.
+- recommend_draft_pick: a best-effort LIVE in-draft assistant. It reads the
+  current ESPN draft state (who's already gone), models your roster
+  construction and starter needs, detects positional runs and value cliffs,
+  and tells you the best picks right now with reasoning.
 - simulate_draft: an OFFLINE snake-draft simulator to rehearse solo and
   repeatedly. Opponents pick by need-weighted VBD with realistic ADP noise;
   your slot picks optimally (same logic as recommend_draft_pick). Returns your
@@ -30,8 +30,8 @@ from .errors import (
     create_success_response,
     handle_http_errors,
 )
+from .espn_fantasy_tools import get_espn_draft, get_espn_league
 from .player_values import get_values_service, scoring_to_ppr
-from .sleeper_tools import get_draft, get_draft_picks
 
 logger = logging.getLogger(__name__)
 
@@ -235,16 +235,117 @@ def _need_multiplier(pos: str, my_counts: dict[str, int], reqs: dict[str, int], 
     return 1.0, "depth"
 
 
-def _scoring_from_draft(draft: dict) -> str:
-    meta = (draft or {}).get("metadata") or {}
-    st = (meta.get("scoring_type") or "").lower()
-    if "half" in st:
-        return "half-ppr"
-    if "ppr" in st:
+# ESPN lineup-slot ids relevant to starter-requirement counting. Slot ids share
+# numbering with POSITION_ID_MAP (espn_fantasy_tools.py) for base positions
+# (0=QB, 2=RB, 4=WR, 6=TE) -- those never appear as a player's
+# `defaultPositionId`, so there's no collision -- plus the flex/superflex slot
+# ids ESPN uses (source: cwendt94/espn-api's POSITION_MAP, the same map
+# docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §1 cites for `rosterSettings.lineupSlotCounts`).
+_ESPN_SLOT_QB = 0
+_ESPN_SLOT_RB = 2
+_ESPN_SLOT_RB_WR_FLEX = 3
+_ESPN_SLOT_WR = 4
+_ESPN_SLOT_WR_TE_FLEX = 5
+_ESPN_SLOT_TE = 6
+_ESPN_SLOT_SUPERFLEX = 7  # "OP" -- any offensive player, including QB
+_ESPN_SLOT_FLEX = 23  # "RB/WR/TE"
+
+
+def _espn_settings_to_sleeper_shape(espn_settings: dict) -> dict:
+    """Adapt an ESPN league's `settings` (mSettings view) into the
+    Sleeper-shaped settings dict `_starter_requirements` -- and this module's
+    own `num_teams`/`superflex` reads -- already consume, so that logic needs
+    no changes for the ESPN cutover.
+    """
+    espn_settings = espn_settings or {}
+    slot_counts = ((espn_settings.get("rosterSettings") or {}).get("lineupSlotCounts")) or {}
+
+    def slot(slot_id: int) -> int:
+        try:
+            return int(slot_counts.get(str(slot_id), 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "teams": espn_settings.get("size", 12),
+        "slots_qb": slot(_ESPN_SLOT_QB),
+        "slots_rb": slot(_ESPN_SLOT_RB),
+        "slots_wr": slot(_ESPN_SLOT_WR),
+        "slots_te": slot(_ESPN_SLOT_TE),
+        "slots_flex": slot(_ESPN_SLOT_FLEX),
+        "slots_rb_wr": slot(_ESPN_SLOT_RB_WR_FLEX),
+        "slots_wr_te": slot(_ESPN_SLOT_WR_TE_FLEX),
+        "slots_super_flex": slot(_ESPN_SLOT_SUPERFLEX),
+    }
+
+
+def _ppr_from_espn_settings(espn_settings: dict) -> float:
+    """Read the league's PPR value from ESPN's "Each reception" scoring item.
+
+    Mirrors docs/adr/0007-espn-module-rewiring-mechanics.md's
+    `league_format_from_settings` convention: PPR is read from
+    `scoringSettings.scoringItems` where `statId == 53`, falling back to full
+    PPR (1.0) if that item is absent -- ESPN's `scoringSettings.scoringType`
+    field describes H2H-vs-points format, not PPR level, so it isn't used here.
+    """
+    scoring_items = ((espn_settings or {}).get("scoringSettings") or {}).get("scoringItems") or []
+    for item in scoring_items:
+        if item.get("statId") == 53:
+            try:
+                return float(item.get("points"))
+            except (TypeError, ValueError):
+                break
+    return 1.0
+
+
+def _scoring_label_from_ppr(ppr: float) -> str:
+    """Bucket a raw PPR value into the "ppr"/"half-ppr"/"standard" labels used elsewhere."""
+    if ppr >= 1.0:
         return "ppr"
-    if st in ("std", "standard", "2qb"):
+    if ppr <= 0.0:
         return "standard"
-    return "ppr"
+    return "half-ppr"
+
+
+def _espn_pick_to_sleeper_pick(
+    pick: dict[str, Any],
+    player_cache: dict[str, dict[str, Any]],
+    values_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Adapt one ESPN `draftDetail.picks[]` entry into the Sleeper-shaped pick
+    dict this module's VBD/analysis logic already consumes.
+
+    ESPN picks carry only a bare `playerId` -- no name or position -- so
+    per-pick enrichment joins that id directly against the ESPN-keyed player
+    cache (`athlete_tools.fetch_athletes`'s `athletes` table, which covers
+    every pro player) and, as a fallback, the FantasyCalc values list (which
+    covers only fantasy-relevant skill players). Both are already keyed on
+    ESPN player id. `enrich_roster_entries` isn't reused here since it expects
+    a raw roster/box-score entry shape a draft pick doesn't have.
+
+    ESPN has no separate "draft slot" concept distinct from team identity --
+    the `teamId` on a pick already identifies which team made it -- so it
+    fills the Sleeper shape's `draft_slot` field directly.
+    """
+    player_id = pick.get("playerId")
+    pid = str(player_id) if player_id is not None else None
+    cached = (player_cache.get(pid) if pid else None) or {}
+    value_entry = (values_by_id.get(pid) if pid else None) or {}
+
+    full_name = cached.get("full_name") or value_entry.get("name") or ""
+    first_name, _, last_name = full_name.partition(" ")
+    position = (cached.get("position") or value_entry.get("position") or "").upper()
+
+    return {
+        "player_id": pid,
+        "round": pick.get("roundId"),
+        "draft_slot": pick.get("teamId"),
+        "metadata": {
+            "first_name": first_name,
+            "last_name": last_name,
+            "position": position,
+        },
+    }
 
 
 @handle_http_errors(
@@ -252,45 +353,73 @@ def _scoring_from_draft(draft: dict) -> str:
     operation_name="recommending draft pick",
 )
 async def recommend_draft_pick(
-    draft_id: str,
+    league_id: str,
+    year: int | None = None,
     my_slot: int | None = None,
     num_suggestions: int = 5,
     db=None,
 ) -> dict[str, Any]:
-    """Recommend the best pick(s) right now in a live Sleeper draft.
+    """Recommend the best pick(s) right now in a best-effort live ESPN draft.
 
-    Reads the live draft (who's gone, settings, scoring), models your roster and
+    Reads the ESPN draft (who's gone, settings, scoring), models your roster and
     starter needs, detects positional runs and value cliffs, and returns the top
-    picks by need-weighted VBD with reasoning.
+    picks by need-weighted VBD with reasoning. "Best-effort live": ESPN's
+    `draftDetail.inProgress` field suggests live tracking exists, but this
+    tool's update cadence during an active draft has never been independently
+    verified.
 
     Args:
-        draft_id: Sleeper draft id.
-        my_slot: Your draft slot (1..N). If given, picks are weighted to your
-                 roster construction; otherwise pure best-available.
+        league_id: The ESPN league ID.
+        year: Season year; defaults to the current year if omitted.
+        my_slot: Your ESPN team id (`mTeam.id`). If given, picks are weighted
+                 to your roster construction; otherwise pure best-available.
         num_suggestions: How many picks to return (default 5).
 
     Returns: {suggestions, best_available_by_position, my_roster, positional_run,
               on_the_clock, format, source, stale}
     """
-    if not draft_id:
-        return create_error_response("draft_id required", ErrorType.VALIDATION, {"suggestions": []})
+    if not league_id:
+        return create_error_response("league_id required", ErrorType.VALIDATION, {"suggestions": []})
 
-    draft_res = await get_draft(draft_id)
+    draft_res = await get_espn_draft(league_id, year)
     if not draft_res.get("success") or not draft_res.get("draft"):
         return create_error_response(
-            f"Could not load draft {draft_id}: {draft_res.get('error')}",
+            f"Could not load draft for league {league_id}: {draft_res.get('error')}",
             ErrorType.HTTP, {"suggestions": []},
         )
-    draft = draft_res["draft"]
-    settings = draft.get("settings") or {}
+    draft_detail = (draft_res["draft"] or {}).get("draftDetail") or {}
+    raw_picks = sorted(draft_detail.get("picks") or [], key=lambda p: p.get("overallPickNumber") or 0)
+
+    league_res = await get_espn_league(league_id, year)
+    if not league_res.get("success") or not league_res.get("league"):
+        return create_error_response(
+            f"Could not load settings for league {league_id}: {league_res.get('error')}",
+            ErrorType.HTTP, {"suggestions": []},
+        )
+    espn_settings = (league_res["league"] or {}).get("settings") or {}
+    settings = _espn_settings_to_sleeper_shape(espn_settings)
     reqs = _starter_requirements(settings)
     num_teams = int(settings.get("teams", 12) or 12)
     superflex = int(settings.get("slots_super_flex", 0) or 0) > 0 or int(settings.get("slots_qb", 1) or 1) >= 2
-    scoring = _scoring_from_draft(draft)
-    dynasty = (draft.get("type") == "dynasty") or ((draft.get("metadata") or {}).get("is_dynasty") in (True, "true"))
+    ppr = _ppr_from_espn_settings(espn_settings)
+    scoring = _scoring_label_from_ppr(ppr)
+    dynasty = int((espn_settings.get("draftSettings") or {}).get("keeperCount", 0) or 0) > 0
 
-    picks_res = await get_draft_picks(draft_id)
-    picks = picks_res.get("picks", []) if picks_res.get("success") else []
+    # Values for this exact format, fetched up front so the pick adapter can
+    # also fall back onto FantasyCalc's name/position for per-pick enrichment.
+    service = get_values_service(db)
+    data = await service.get_values(ppr, 2 if superflex else 1, num_teams, dynasty)
+    values = data.get("list", [])
+    if not values:
+        return create_error_response(
+            "No player values available (value API unreachable and no cache)",
+            ErrorType.HTTP, {"suggestions": [], "source": data.get("source")},
+        )
+    values_by_id = {str(v["player_id"]): v for v in values if v.get("player_id")}
+
+    player_ids = [str(p["playerId"]) for p in raw_picks if p.get("playerId") is not None]
+    player_cache = service.db.get_athletes_by_ids(player_ids) if service.db and player_ids else {}
+    picks = [_espn_pick_to_sleeper_pick(p, player_cache, values_by_id) for p in raw_picks]
 
     drafted_ids = set()
     my_counts: dict[str, int] = {}
@@ -315,15 +444,6 @@ async def recommend_draft_pick(
     for pos in ("RB", "WR", "TE"):
         flex_filled += max(0, my_counts.get(pos, 0) - reqs.get(pos, 0))
 
-    # Values + VBD for this exact format.
-    service = get_values_service(db)
-    data = await service.get_values(scoring_to_ppr(scoring), 2 if superflex else 1, num_teams, dynasty)
-    values = data.get("list", [])
-    if not values:
-        return create_error_response(
-            "No player values available (value API unreachable and no cache)",
-            ErrorType.HTTP, {"suggestions": [], "source": data.get("source")},
-        )
     vbd = compute_vbd(values, num_teams, superflex)
 
     available = [p for p in vbd["players"] if str(p.get("player_id")) not in drafted_ids]
@@ -417,7 +537,7 @@ async def recommend_draft_pick(
             "starter_requirements": reqs,
         } if my_slot is not None else None,
         "picks_made": len(picks),
-        "format": {"scoring": scoring, "ppr": scoring_to_ppr(scoring), "superflex": superflex,
+        "format": {"scoring": scoring, "ppr": ppr, "superflex": superflex,
                    "num_teams": num_teams, "dynasty": dynasty},
         "source": data.get("source"),
         "stale": data.get("stale", False),

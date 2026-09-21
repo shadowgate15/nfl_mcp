@@ -1,11 +1,10 @@
-"""Sleeper enrichment & data-fetch layer (split out of sleeper_tools.py).
+"""ESPN-core-only leaf-helper module (see ADR 0007).
 
-Best-effort fetchers (schedule, snaps, injuries, practice reports, weekly usage)
-plus the usage/opponent enrichment helpers. These are LEAF helpers — the public
-Sleeper tools call into them, not the reverse — so extracting them is cycle-free.
-Re-exported from ``sleeper_tools`` for backward compatibility.
+Internal plumbing other modules import directly, never registered as MCP
+tools. Everything here is a pure ESPN-core call or an id-scheme-agnostic DB
+lookup, relocated unchanged from the now-deleted Sleeper-era leaf-helper
+module during the Sleeper-to-ESPN cutover (issue #52).
 """
-import json
 import logging
 import os
 from datetime import UTC, datetime
@@ -13,7 +12,6 @@ from datetime import UTC, datetime
 from .config import (
     DEFAULT_TIMEOUT,
     create_http_client,
-    get_http_headers,
 )
 
 logger = logging.getLogger(__name__)
@@ -21,77 +19,6 @@ logger = logging.getLogger(__name__)
 
 ADVANCED_ENRICH_ENABLED = os.getenv("NFL_MCP_ADVANCED_ENRICH") == "1"
 
-async def _fetch_week_player_snaps(season: int, week: int):
-    """Fetch player snap stats (best-effort) from Sleeper weekly stats endpoint.
-
-    Returns list of dicts for upsert_player_week_stats. If advanced enrichment disabled
-    or network/API issues occur, returns empty list.
-
-    Uses retry logic with exponential backoff and circuit breaker pattern.
-    Includes response validation to ensure data quality.
-    """
-    if not ADVANCED_ENRICH_ENABLED:
-        logger.debug("[Fetch Snaps] Skipped: NFL_MCP_ADVANCED_ENRICH not enabled")
-        return []
-
-    logger.info(f"[Fetch Snaps] Starting fetch for season={season}, week={week}")
-
-    async def _fetch():
-        headers = get_http_headers("sleeper_week_stats")
-        url = f"https://api.sleeper.app/v1/stats/nfl/regular/{season}/{week}"
-
-        async with create_http_client() as client:
-            resp = await client.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
-            if resp.status_code != 200:
-                logger.warning(f"[Fetch Snaps] API returned status {resp.status_code}")
-                return []
-            data = resp.json() or {}
-            if not isinstance(data, dict):
-                logger.warning("[Fetch Snaps] Invalid data format (not dict)")
-                return []
-
-            # Validate response
-            from .response_validation import validate_response_and_log, validate_snap_count_response
-            if not validate_response_and_log(data, validate_snap_count_response, "Snaps", allow_partial=True):
-                logger.error("[Fetch Snaps] Response validation failed, returning empty list")
-                return []
-
-            logger.debug(f"[Fetch Snaps] Received data for {len(data)} players")
-            rows = []
-            for pid, stats in list(data.items())[:5000]:  # cap for safety
-                if not isinstance(stats, dict):
-                    continue
-                # Attempt to extract snaps & snap_pct fields (naming may vary)
-                # Sleeper uses 'off_snp' (not 'off_snaps'), so check both variations
-                snaps = stats.get("snaps") or stats.get("off_snp") or stats.get("off_snaps") or stats.get("offense_snaps")
-                team_snaps = stats.get("team_snaps") or stats.get("tm_off_snp") or stats.get("off_team_snaps") or stats.get("team_snp")
-                snap_pct = stats.get("snap_pct") or stats.get("off_snp_pct") or stats.get("off_snap_pct")
-                rows.append({
-                    "player_id": str(pid),
-                    "season": season,
-                    "week": week,
-                    "snaps_offense": snaps,
-                    "snaps_team_offense": team_snaps,
-                    "snap_pct": snap_pct,
-                    "raw": stats
-                })
-
-            logger.info(f"[Fetch Snaps] Successfully fetched {len(rows)} snap records (season={season}, week={week})")
-            return rows
-
-    try:
-        from .retry_utils import CircuitBreakerError, retry_with_backoff
-        # Use retry with circuit breaker for snap fetches
-        return await retry_with_backoff(
-            _fetch,
-            circuit_breaker_name="sleeper_snaps"
-        )
-    except CircuitBreakerError as e:
-        logger.warning(f"[Fetch Snaps] Circuit breaker open: {e}")
-        return []
-    except Exception as e:
-        logger.error(f"[Fetch Snaps] Failed for season={season}, week={week}: {e}", exc_info=True)
-        return []
 
 async def _fetch_week_schedule(season: int, week: int, force: bool = False):
     """Fetch weekly schedule from ESPN scoreboard API (best-effort).
@@ -282,174 +209,60 @@ async def _fetch_all_team_schedules(season: int):
     return all_games
 
 
-async def _fetch_injuries():
-    """Fetch injury reports from ESPN for all NFL teams.
+async def get_current_nfl_week() -> int | None:
+    """Fetch the current NFL week from ESPN-core's parameterless scoreboard endpoint.
 
-    Returns list of dicts with keys: player_id, player_name, team_id, position,
-    injury_status, injury_type, injury_description, date_reported.
+    Calling the scoreboard endpoint with no week/year params returns ESPN's
+    notion of "now", including a top-level `week.number` field. This is the
+    one shared implementation behind callers that previously each ran their
+    own `get_nfl_state()` call just to read `.week`.
+
+    Uses retry logic with exponential backoff and circuit breaker pattern.
+
+    Returns:
+        Current NFL week number, or None on failure.
     """
-    if not ADVANCED_ENRICH_ENABLED:
-        logger.debug("[Fetch Injuries] Skipped: NFL_MCP_ADVANCED_ENRICH not enabled")
-        return []
+    logger.info("[Current Week] Fetching current NFL week from ESPN scoreboard")
 
-    logger.info("[Fetch Injuries] Starting fetch for all teams")
-
-    # NFL team abbreviations
-    teams = [
-        "ARI", "ATL", "BAL", "BUF", "CAR", "CHI", "CIN", "CLE",
-        "DAL", "DEN", "DET", "GB", "HOU", "IND", "JAX", "KC",
-        "LAC", "LAR", "LV", "MIA", "MIN", "NE", "NO", "NYG",
-        "NYJ", "PHI", "PIT", "SF", "SEA", "TB", "TEN", "WSH"  # WSH (not WAS) for Washington
-    ]
-
-    all_injuries = []
-
-    try:
-        import re
-
-        import httpx
-
-        from .config import create_http_client, get_http_headers
-
-        headers = get_http_headers("nfl_teams")
+    async def _fetch():
+        url = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
 
         async with create_http_client() as client:
-            for team in teams:
-                try:
-                    page = 1
-                    page_count = 1  # Will be updated from first response
-                    team_injuries = []
+            resp = await client.get(url, timeout=DEFAULT_TIMEOUT)
+            if resp.status_code != 200:
+                logger.warning(f"[Current Week] ESPN API returned status {resp.status_code}")
+                return None
+            data = resp.json() or {}
+            week_number = (data.get("week") or {}).get("number")
+            if week_number is None:
+                logger.warning("[Current Week] Response missing week.number")
+                return None
+            logger.info(f"[Current Week] Current NFL week: {week_number}")
+            return int(week_number)
 
-                    # Fetch all pages for this team
-                    # Note: ESPN Core API returns items as $ref URLs only
-                    # Removed 10-injury limit - ESPN typically returns 15-25 max anyway
-                    max_injuries_per_team = 50  # Reasonable limit while allowing full data
-                    injuries_fetched = 0
-
-                    while page <= page_count and injuries_fetched < max_injuries_per_team:
-                        url = f"https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/teams/{team}/injuries?limit=50&page={page}"
-                        resp = await client.get(url, headers=headers)
-
-                        if resp.status_code != 200:
-                            logger.debug(f"[Fetch Injuries] Team {team} page {page}: status {resp.status_code}")
-                            break
-
-                        data = resp.json()
-
-                        # Update page count from first response
-                        if page == 1:
-                            page_count = data.get('pageCount', 1)
-
-                            # DEBUG: Log first team's response to understand structure
-                            if team == teams[0]:
-                                logger.info(f"[DEBUG Injuries] {team} response keys: {list(data.keys())}")
-                                logger.info(f"[DEBUG Injuries] {team} count: {data.get('count', 'N/A')}")
-                                logger.info(f"[DEBUG Injuries] {team} pageCount: {page_count}")
-                                logger.info(f"[DEBUG Injuries] {team} page 1 items length: {len(data.get('items', []))}")
-
-                        injuries_data = data.get('items', [])
-
-                        # ESPN Core API v2 returns items as $ref URLs only
-                        # We need to fetch each injury detail separately
-                        for injury_ref in injuries_data:
-                            try:
-                                # Each item is just {"$ref": "url"}
-                                injury_url = injury_ref.get('$ref')
-                                if not injury_url:
-                                    continue
-
-                                # Fetch the actual injury details
-                                injury_resp = await client.get(injury_url, headers=headers)
-                                if injury_resp.status_code != 200:
-                                    continue
-
-                                injury_item = injury_resp.json()
-
-                                # Extract athlete info from the injury details
-                                athlete_ref = injury_item.get('athlete', {})
-                                if not athlete_ref:
-                                    continue
-
-                                # Athlete is also a $ref, so we need to extract from URL or fetch it
-                                athlete_url = athlete_ref.get('$ref', '')
-                                # Extract athlete ID from URL: .../athletes/4428633/...
-                                athlete_id_match = re.search(r'/athletes/(\d+)/', athlete_url)
-                                if not athlete_id_match:
-                                    continue
-
-                                player_id = athlete_id_match.group(1)
-
-                                # Get player name - might need to fetch athlete details
-                                player_name = athlete_ref.get('displayName')
-                                if not player_name:
-                                    # Try fetching athlete details
-                                    try:
-                                        athlete_detail_resp = await client.get(athlete_url, headers=headers)
-                                        if athlete_detail_resp.status_code == 200:
-                                            athlete_detail = athlete_detail_resp.json()
-                                            player_name = athlete_detail.get('displayName', 'Unknown')
-                                        else:
-                                            player_name = 'Unknown'
-                                    except (httpx.HTTPError, json.JSONDecodeError, KeyError, AttributeError):
-                                        player_name = 'Unknown'
-
-                                # Status and type are nested objects
-                                status_data = injury_item.get('status', {})
-                                type_data = injury_item.get('type', {})
-
-                                # Normalize status and calculate severity
-                                raw_status = status_data if isinstance(status_data, str) else status_data.get('description', 'Unknown')
-                                from .injury_service import InjuryAggregator
-                                normalized_status = InjuryAggregator.normalize_status(raw_status)
-                                severity = InjuryAggregator.get_severity(normalized_status)
-
-                                injury = {
-                                    'player_id': str(player_id),
-                                    'player_name': player_name,
-                                    'team_id': team,
-                                    'position': None,  # Not available in injury endpoint
-                                    'injury_status': normalized_status,
-                                    'injury_type': type_data.get('name') if isinstance(type_data, dict) else None,
-                                    'injury_description': injury_item.get('shortComment') or injury_item.get('longComment'),
-                                    'severity': severity,
-                                    'confidence': 60,  # Single source (ESPN)
-                                    'sources': ['ESPN'],
-                                    'date_reported': injury_item.get('date')
-                                }
-                                team_injuries.append(injury)
-                                injuries_fetched += 1
-
-                                # Stop if we've reached the limit per team
-                                if injuries_fetched >= max_injuries_per_team:
-                                    break
-
-                            except Exception as e:
-                                logger.debug(f"[Fetch Injuries] Failed to fetch injury detail: {e}")
-                                continue
-
-                        # Move to next page
-                        page += 1
-
-                    # Add all injuries from this team
-                    all_injuries.extend(team_injuries)
-
-                except Exception as e:
-                    logger.debug(f"[Fetch Injuries] Team {team} failed: {e}")
-                    continue
-
-        logger.info(f"[Fetch Injuries] Successfully fetched {len(all_injuries)} injury records across {len(teams)} teams")
-        return all_injuries
-
+    try:
+        from .retry_utils import CircuitBreakerError, retry_with_backoff
+        return await retry_with_backoff(
+            _fetch,
+            circuit_breaker_name="espn_scoreboard_current_week"
+        )
+    except CircuitBreakerError as e:
+        logger.warning(f"[Current Week] Circuit breaker open: {e}")
+        return None
     except Exception as e:
-        logger.error(f"[Fetch Injuries] Failed: {e}", exc_info=True)
-        return []
+        logger.error(f"[Current Week] Failed: {e}", exc_info=True)
+        return None
+
 
 async def _fetch_practice_reports(season: int, week: int):
-    """Fetch practice status reports (DNP/LP/FP) from ESPN injuries endpoint.
+    """Fetch practice status reports (DNP/LP/FP) from ESPN injury data.
 
     Returns list of dicts with keys: player_id, date, status, source.
 
-    Note: This uses the injuries endpoint which includes practice participation status.
+    Note: This derives practice status from injury reports (DNP/Limited/Full),
+    sourced from injury_service.get_injury_reports() — the concurrent,
+    confidence-scored aggregator that also backs the live injury MCP tools —
+    rather than a standalone practice-report endpoint.
     Uses retry logic with exponential backoff and circuit breaker pattern.
     Includes response validation to ensure data quality.
     """
@@ -462,7 +275,8 @@ async def _fetch_practice_reports(season: int, week: int):
     async def _fetch():
         # Use injury reports as source for practice status
         # Practice status is often reflected in injury reports (DNP/Limited/Full)
-        injuries = await _fetch_injuries()
+        from .injury_service import get_injury_reports
+        injuries = await get_injury_reports()
 
         if not injuries:
             logger.warning("[Fetch Practice] No injury data available to extract practice status")
@@ -473,7 +287,7 @@ async def _fetch_practice_reports(season: int, week: int):
         now = datetime.now(UTC).isoformat()
 
         for inj in injuries:
-            status = inj.get('injury_status', '').upper()
+            status = (inj.get('injury_status') or '').upper()
 
             # Map injury status to practice participation
             practice_status = None
@@ -520,193 +334,6 @@ async def _fetch_practice_reports(season: int, week: int):
         logger.error(f"[Fetch Practice] Failed for season={season}, week={week}: {e}", exc_info=True)
         return []
 
-async def _fetch_weekly_usage_stats(season: int, week: int):
-    """Fetch weekly usage statistics (targets, routes, RZ touches) from available sources.
-
-    Returns list of dicts for upsert_usage_stats.
-    Attempts Sleeper stats first, falls back to ESPN if needed.
-    Uses retry logic with exponential backoff and circuit breaker pattern.
-    Includes response validation to ensure data quality.
-    """
-    if not ADVANCED_ENRICH_ENABLED:
-        logger.debug("[Fetch Usage] Skipped: NFL_MCP_ADVANCED_ENRICH not enabled")
-        return []
-
-    logger.info(f"[Fetch Usage] Starting fetch for season={season}, week={week}")
-
-    async def _fetch():
-        # Try Sleeper weekly stats endpoint first
-        headers = get_http_headers("sleeper_week_stats")
-        url = f"https://api.sleeper.app/v1/stats/nfl/regular/{season}/{week}"
-
-        async with create_http_client() as client:
-            resp = await client.get(url, headers=headers, timeout=DEFAULT_TIMEOUT)
-            if resp.status_code == 200:
-                data = resp.json() or {}
-                if isinstance(data, dict):
-                    logger.debug(f"[Fetch Usage] Received data for {len(data)} players")
-                    stats = []
-                    for pid, player_stats in list(data.items())[:3000]:  # cap
-                        if not isinstance(player_stats, dict):
-                            continue
-                        # Extract usage fields (naming varies by API)
-                        # Use explicit None checks to handle 0 values correctly
-                        targets = player_stats.get("rec_tgt")
-                        if targets is None:
-                            targets = player_stats.get("targets")
-
-                        # Routes should only be actual routes run, not snap count
-                        # Try multiple possible field names for routes data
-                        routes = player_stats.get("routes_run")
-                        routes_field_used = None
-                        if routes is not None:
-                            routes_field_used = "routes_run"
-                        elif (routes := player_stats.get("routes")) is not None:
-                            routes_field_used = "routes"
-                        elif (routes := player_stats.get("rec_routes")) is not None:
-                            routes_field_used = "rec_routes"
-                        elif (routes := player_stats.get("pass_routes")) is not None:
-                            routes_field_used = "pass_routes"
-                        elif (routes := player_stats.get("receiving_routes")) is not None:
-                            routes_field_used = "receiving_routes"
-
-                        # Log diagnostic info for routes field detection (sample first 5 players)
-                        if len(stats) < 5:
-                            if routes is not None:
-                                logger.debug(f"[Fetch Usage] Player {pid}: routes={routes} from field '{routes_field_used}'")
-                            else:
-                                # Check what fields ARE available for this player
-                                available_fields = list(player_stats.keys())[:10]  # Sample fields
-                                logger.debug(f"[Fetch Usage] Player {pid}: routes=None, available fields: {available_fields}")
-
-                        # Calculate RZ touches from multiple sources
-                        # Try multiple field names for better API compatibility
-                        # Use explicit None checks to preserve 0 values
-                        rz_tgt = player_stats.get("rec_tgt_rz")
-                        if rz_tgt is None:
-                            rz_tgt = player_stats.get("rec_targets_rz")
-                        if rz_tgt is None:
-                            rz_tgt = player_stats.get("redzone_targets")
-                        if rz_tgt is None:
-                            rz_tgt = 0
-
-                        rz_rush = player_stats.get("rush_att_rz")
-                        if rz_rush is None:
-                            rz_rush = player_stats.get("rush_attempts_rz")
-                        if rz_rush is None:
-                            rz_rush = player_stats.get("redzone_rushes")
-                        if rz_rush is None:
-                            rz_rush = player_stats.get("redzone_rush_attempts")
-                        if rz_rush is None:
-                            rz_rush = 0
-
-                        rz_touches = rz_tgt + rz_rush
-
-                        # If no explicit RZ data, estimate from TDs (TDs often happen in RZ)
-                        if rz_touches == 0:
-                            rec_td = player_stats.get("rec_td", 0)
-                            rush_td = player_stats.get("rush_td", 0)
-                            td_total = rec_td + rush_td
-
-                            if td_total > 0:
-                                rz_touches = td_total
-                            else:
-                                # Truly 0 or data missing
-                                pass
-
-                        # Calculate total touches
-                        rush_att = player_stats.get("rush_att", 0)
-                        receptions = player_stats.get("rec", 0)
-                        touches = rush_att + receptions
-
-                        # Air yards - preserve 0 values
-                        air_yards = player_stats.get("rec_air_yds")
-                        if air_yards is None:
-                            air_yards = player_stats.get("air_yards")
-
-                        # Get snap percentage - try multiple field names and calculation methods
-                        # Use explicit None checks to preserve 0 values
-                        snap_share = player_stats.get("snap_pct")
-                        if snap_share is None:
-                            snap_share = player_stats.get("off_snp_pct")
-                        if snap_share is None:
-                            snap_share = player_stats.get("snap_share")
-                        if snap_share is None:
-                            snap_share = player_stats.get("snap_percentage")
-                        if snap_share is None:
-                            snap_share = player_stats.get("snaps_pct")
-
-                        # Calculate from absolute snaps if percentage not provided
-                        if snap_share is None:
-                            off_snp = player_stats.get("off_snp")
-                            team_snp = player_stats.get("team_snp")
-                            if team_snp is None:
-                                team_snp = player_stats.get("tm_off_snp")
-
-                            if off_snp is not None and team_snp is not None and team_snp > 0:
-                                snap_share = round((off_snp / team_snp) * 100, 1)
-                            else:
-                                pass
-
-                        # Only include if at least one usage metric present
-                        if any([targets, routes, rz_touches, touches]):
-                            stats.append({
-                                "player_id": str(pid),
-                                "season": season,
-                                "week": week,
-                                "targets": targets,
-                                "routes": routes,
-                                "rz_touches": rz_touches,
-                                "touches": touches,
-                                "air_yards": air_yards,
-                                "snap_share": snap_share
-                            })
-
-                    if stats:
-                        # Validate response
-                        from .response_validation import (
-                            validate_response_and_log,
-                            validate_usage_stats_response,
-                        )
-                        if not validate_response_and_log(stats, validate_usage_stats_response, "Usage", allow_partial=True):
-                            logger.error("[Fetch Usage] Response validation failed, returning empty list")
-                            return []
-
-                        # Log diagnostic summary about routes data availability
-                        routes_available = sum(1 for s in stats if s.get("routes") is not None)
-                        routes_zero = sum(1 for s in stats if s.get("routes") == 0)
-                        routes_none = sum(1 for s in stats if s.get("routes") is None)
-                        logger.info(
-                            f"[Fetch Usage] Successfully fetched {len(stats)} usage records "
-                            f"(season={season}, week={week}). "
-                            f"Routes data: {routes_available} with data "
-                            f"({routes_zero} with 0, {routes_none} with None)"
-                        )
-                        return stats
-                    else:
-                        logger.warning("[Fetch Usage] No valid usage stats found in response")
-            else:
-                logger.warning(f"[Fetch Usage] Sleeper API returned status {resp.status_code}")
-
-        # Fallback: ESPN (limited coverage, best-effort)
-        # Note: ESPN player stats API may require iterating by position or fetching league leaders
-        # For simplicity, return empty list (can be extended later)
-        logger.warning(f"[Fetch Usage] No usage stats available from any source for season={season}, week={week}")
-        return []
-
-    try:
-        from .retry_utils import CircuitBreakerError, retry_with_backoff
-        # Use retry with circuit breaker for usage fetches
-        return await retry_with_backoff(
-            _fetch,
-            circuit_breaker_name="sleeper_usage"
-        )
-    except CircuitBreakerError as e:
-        logger.warning(f"[Fetch Usage] Circuit breaker open: {e}")
-        return []
-    except Exception as e:
-        logger.error(f"[Fetch Usage] Failed for season={season}, week={week}: {e}", exc_info=True)
-        return []
 
 def _estimate_snap_pct(depth_rank: int | None, position: str | None = None) -> float | None:
     """Estimate snap percentage based on depth chart and position.

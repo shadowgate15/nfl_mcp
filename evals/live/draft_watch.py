@@ -1,16 +1,16 @@
 """
-Live draft "war room" — watch a real Sleeper draft and get a recommendation
-each time you're on the clock.
+Live draft "war room" — watch a real ESPN draft and get a recommendation each
+time you're on the clock.
 
 This is the reusable version of the ad-hoc loop we used to validate the draft
-flow live. Point it at a live/mock Sleeper draft and your slot; it polls the real
+flow live. Point it at a live/mock ESPN league and your team id; it polls the
 draft state, and when it's your turn it prints roster context + the top picks
-(with value cliffs and positional runs). In the bench rounds it flips to a depth
-overlay (RB/WR + handcuffs), because pure VBD goes blind on deep benches.
+(with value cliffs and positional runs). In the bench rounds it flips to a
+depth overlay (RB/WR + handcuffs), because pure VBD goes blind on deep benches.
 
 Usage:
-    python -m evals.live.draft_watch --draft-id 1384996703937003520 --my-slot 4
-    python -m evals.live.draft_watch --draft-id <id> --my-slot 4 --once   # single check
+    python -m evals.live.draft_watch --league-id 1234 --my-slot 4
+    python -m evals.live.draft_watch --league-id 1234 --my-slot 4 --once   # single check
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import tempfile
 from collections import Counter
 
 from nfl_mcp import draft_tools as dt
-from nfl_mcp import sleeper_tools as st
+from nfl_mcp import espn_fantasy_tools as eft
 from nfl_mcp.database import NFLDatabase
 
 VBD_POS = ("QB", "RB", "WR", "TE")
@@ -33,25 +33,37 @@ def _starters_full(counts: dict, reqs: dict) -> bool:
     return base_full and flex_full
 
 
-async def _show_turn(db, draft_id: str, my_slot: int, teams: int, reqs: dict, picks, num: int):
+def _label(db, player_id) -> tuple[str, str]:
+    """Best-effort (name, position) for a bare ESPN playerId via the athletes cache."""
+    athlete = db.get_athlete_by_id(str(player_id)) or {}
+    return athlete.get("full_name") or f"player {player_id}", athlete.get("position") or "?"
+
+
+async def _show_turn(db, league_id: str, year: int | None, my_slot: int, teams: int, reqs: dict, picks, num: int):
     n = len(picks)
-    mine = [pk for pk in picks if pk.get("draft_slot") == my_slot]
-    counts = Counter((pk.get("metadata") or {}).get("position") for pk in mine)
-    my_last = max((pk.get("pick_no", 0) for pk in mine), default=0)
-    since = [pk for pk in picks if pk.get("pick_no", 0) > my_last]
+    mine = [pk for pk in picks if pk.get("teamId") == my_slot]
+    my_positions = []
+    for pk in mine:
+        _, pos = _label(db, pk.get("playerId"))
+        my_positions.append(pos)
+    counts = Counter(my_positions)
+    my_last = max((pk.get("overallPickNumber", 0) for pk in mine), default=0)
+    since = [pk for pk in picks if pk.get("overallPickNumber", 0) > my_last]
     rnd = n // teams + 1
 
     print("\n" + "=" * 70)
-    print(f">>> YOU'RE ON THE CLOCK — pick #{n + 1} (round {rnd}), slot {my_slot}")
+    print(f">>> YOU'RE ON THE CLOCK — pick #{n + 1} (round {rnd}), team {my_slot}")
     print("=" * 70)
-    team = [f"{(pk.get('metadata') or {}).get('last_name','?')}"
-            f"({(pk.get('metadata') or {}).get('position','?')})" for pk in mine]
+    team = []
+    for pk in mine:
+        name, pos = _label(db, pk.get("playerId"))
+        team.append(f"{name}({pos})")
     print("Your roster:", team or "(empty)")
     if since:
-        print(f"Gone since your last pick ({len(since)}): "
-              f"{dict(Counter((pk.get('metadata') or {}).get('position') for pk in since))}")
+        since_positions = [_label(db, pk.get("playerId"))[1] for pk in since]
+        print(f"Gone since your last pick ({len(since)}): {dict(Counter(since_positions))}")
 
-    r = await dt.recommend_draft_pick(draft_id, my_slot=my_slot, num_suggestions=num, db=db)
+    r = await dt.recommend_draft_pick(league_id, year=year, my_slot=my_slot, num_suggestions=num, db=db)
     if not r.get("success"):
         print("recommend error:", r.get("error"))
         return
@@ -76,57 +88,70 @@ async def _show_turn(db, draft_id: str, my_slot: int, teams: int, reqs: dict, pi
               + (" — but in bench mode, take the RB/WR body above" if bench_mode else ""))
 
 
-async def _final(picks, my_slot):
-    mine = [pk for pk in picks if pk.get("draft_slot") == my_slot]
+def _final(db, picks, my_slot):
+    mine = sorted(
+        (pk for pk in picks if pk.get("teamId") == my_slot),
+        key=lambda x: x.get("overallPickNumber", 0),
+    )
     print("\n" + "=" * 70)
     print("DRAFT COMPLETE — your roster:")
-    for pk in sorted(mine, key=lambda x: x.get("pick_no", 0)):
-        m = pk.get("metadata") or {}
-        print(f"  R{pk.get('round')}  {m.get('first_name','')} {m.get('last_name','')} ({m.get('position')})")
+    for pk in mine:
+        name, pos = _label(db, pk.get("playerId"))
+        print(f"  R{pk.get('roundId')}  {name} ({pos})")
     print("=" * 70)
 
 
-async def run(draft_id: str, my_slot: int, interval: int, num: int, once: bool):
+async def run(league_id: str, year: int | None, my_slot: int, interval: int, num: int, once: bool):
     db = NFLDatabase(tempfile.mktemp(suffix=".db"))
-    d = await st.get_draft(draft_id)
-    if not (d.get("success") and d.get("draft")):
-        print("Could not load draft:", d.get("error"))
+    lg = await eft.get_espn_league(league_id, year)
+    if not (lg.get("success") and lg.get("league")):
+        print("Could not load league settings:", lg.get("error"))
         return 1
-    s = d["draft"].get("settings", {}) or {}
-    teams = int(s.get("teams", 12) or 12)
-    rounds = int(s.get("rounds", 15) or 15)
-    reqs = dt._starter_requirements(s)
-    print(f"Watching draft {draft_id}: {teams}-team {dt._scoring_from_draft(d['draft'])} "
-          f"snake, {rounds} rounds. You are slot {my_slot}. Starters: {reqs}")
+    espn_settings = lg["league"].get("settings", {}) or {}
+    settings = dt._espn_settings_to_sleeper_shape(espn_settings)
+    teams = int(settings.get("teams", 12) or 12)
+    reqs = dt._starter_requirements(settings)
+    ppr = dt._ppr_from_espn_settings(espn_settings)
+    print(f"Watching league {league_id}: {teams}-team {dt._scoring_label_from_ppr(ppr)}. "
+          f"You are team {my_slot}. Starters: {reqs}")
 
     recommended_for = -1
     while True:
-        p = await st.get_draft_picks(draft_id)
-        picks = p.get("picks", []) if p.get("success") else []
+        d = await eft.get_espn_draft(league_id, year)
+        if not (d.get("success") and d.get("draft")):
+            print("Could not load draft:", d.get("error"))
+            return 1
+        draft_detail = (d["draft"] or {}).get("draftDetail") or {}
+        picks = sorted(draft_detail.get("picks") or [], key=lambda p: p.get("overallPickNumber") or 0)
         n = len(picks)
-        if n >= teams * rounds:
-            await _final(picks, my_slot)
+        if draft_detail.get("drafted") and not draft_detail.get("inProgress") and n > 0:
+            _final(db, picks, my_slot)
             return 0
-        on_clock = dt._snake_slot(n, teams)
+        # Best-effort: assumes standard snake order (team ids picking 1..N,
+        # reversing each round). ESPN's actual draft order per team id isn't
+        # confirmed anywhere in the catalog, so this can misfire for a league
+        # with a randomized/non-sequential team-id draft order.
+        on_clock = dt._snake_slot(n, teams) if teams else None
         if on_clock == my_slot and n != recommended_for:
-            await _show_turn(db, draft_id, my_slot, teams, reqs, picks, num)
+            await _show_turn(db, league_id, year, my_slot, teams, reqs, picks, num)
             recommended_for = n
             if once:
                 return 0
-            print("\n(make your pick in Sleeper; watching for the next turn — Ctrl-C to stop)")
+            print("\n(make your pick in ESPN; watching for the next turn — Ctrl-C to stop)")
         await asyncio.sleep(interval)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Live Sleeper draft watcher")
-    ap.add_argument("--draft-id", required=True)
-    ap.add_argument("--my-slot", type=int, required=True)
+    ap = argparse.ArgumentParser(description="Live ESPN draft watcher")
+    ap.add_argument("--league-id", required=True)
+    ap.add_argument("--year", type=int, default=None)
+    ap.add_argument("--my-slot", type=int, required=True, help="your ESPN team id (mTeam.id)")
     ap.add_argument("--interval", type=int, default=8, help="poll seconds")
     ap.add_argument("--num", type=int, default=6, help="suggestions to show")
     ap.add_argument("--once", action="store_true", help="single check, don't loop")
     args = ap.parse_args()
     try:
-        return asyncio.run(run(args.draft_id, args.my_slot, args.interval, args.num, args.once))
+        return asyncio.run(run(args.league_id, args.year, args.my_slot, args.interval, args.num, args.once))
     except KeyboardInterrupt:
         print("\nstopped.")
         return 0

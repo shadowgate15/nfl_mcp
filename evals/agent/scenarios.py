@@ -10,9 +10,9 @@ SCENARIOS = [
     # --- Drafting -----------------------------------------------------------
     {
         "id": "draft_pick_live",
-        "prompt": "I'm in Sleeper draft 998877 at draft slot 7 and I'm on the clock. Who should I take right now?",
+        "prompt": "I'm drafting in ESPN league 998877 and I'm on the clock, my team id is 7. Who should I take right now?",
         "expect": ["recommend_draft_pick"],
-        "args": {"draft_id": "998877", "my_slot": 7},
+        "args": {"league_id": "998877", "my_slot": 7},
     },
     {
         "id": "draft_board",
@@ -70,22 +70,12 @@ SCENARIOS = [
         "expect": ["get_waiver_wire_dashboard", "get_waiver_log"],
         "args": {"league_id": "555"},
     },
-    {
-        "id": "trending",
-        "prompt": "Who are the most-added players across Sleeper right now?",
-        "expect": ["get_trending_players"],
-    },
     # --- Strategy -----------------------------------------------------------
     {
         "id": "playoff_odds",
         "prompt": "What are my playoff odds in league 555?",
         "expect": ["get_playoff_odds"],
         "args": {"league_id": "555"},
-    },
-    {
-        "id": "find_leagues",
-        "prompt": "My Sleeper username is gridiron_gary — find my leagues for the 2026 season.",
-        "expect": ["get_user", "get_user_leagues"],
     },
     {
         "id": "stacks",
