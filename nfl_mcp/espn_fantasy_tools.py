@@ -814,6 +814,44 @@ def enrich_roster_entries(
     return enriched
 
 
+def enrich_roster(entries: list[dict[str, Any]], db: Any) -> list[dict[str, Any]]:
+    """Reconstruct one team's enriched player list, joined against the player-identity DB.
+
+    `enrich_roster_entries` takes a pre-built `player_cache`; this wrapper supplies
+    that cache from `db` so callers don't each re-implement the same two-step
+    id-harvest-then-join glue: a first pass against an empty cache reads each
+    entry's player id straight off ESPN's own payload (via that helper's raw-field
+    fallback), then a second pass against a cache built from those ids (via
+    `db.get_athletes_by_ids`) fills in name/team/position from the player-identity
+    cache where available. Shared by `faab_tools.py` (marginal-upgrade
+    calculations) and `trade_analyzer_tools.py` (positional-needs calculations).
+
+    Args:
+        entries: Raw `roster.entries` from `get_espn_rosters` (fetched with
+            `detail="full"`).
+        db: NFLDatabase instance, or None to skip the cache join entirely.
+
+    Returns:
+        One enriched dict per entry (`enrich_roster_entries`'s own contract):
+        `player_id`, `full_name`, `position`, `team`, `lineup_slot_id`.
+    """
+    provisional = enrich_roster_entries(entries, {})
+    if db is None:
+        return provisional
+
+    player_ids = [str(p["player_id"]) for p in provisional if p.get("player_id") is not None]
+    athletes = db.get_athletes_by_ids(player_ids) if player_ids else {}
+    player_cache = {
+        player_id: {
+            "full_name": athlete.get("full_name"),
+            "team": athlete.get("team_id"),
+            "position": athlete.get("position"),
+        }
+        for player_id, athlete in athletes.items()
+    }
+    return enrich_roster_entries(entries, player_cache)
+
+
 def _standings_sort_key(team: dict[str, Any]) -> int:
     """
     Based on `espn-api`'s `League.standings()` sort key (`league.py:513-515`,

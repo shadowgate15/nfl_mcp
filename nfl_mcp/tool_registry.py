@@ -1077,31 +1077,33 @@ async def recommend_faab_bid(
     league_id: str,
     player_id: str | None = None,
     player_name: str | None = None,
-    my_roster_id: int | None = None,
+    team_id: int | None = None,
 ) -> dict:
     """Recommend a FAAB waiver bid for a player (% of budget + absolute).
 
     Combines the player's real market value, the marginal upgrade for your roster,
-    league demand (trending adds), and your remaining budget / weeks left.
+    league demand, and your remaining budget / weeks left. ESPN has no trending-adds
+    signal (unlike Sleeper), so league demand is frozen at neutral (demand_label
+    "unavailable") rather than fabricated.
 
     Parameters:
-        league_id (str, required): Sleeper league id.
-        player_id (str, optional): Sleeper player id of the target (preferred).
+        league_id (str, required): ESPN league id.
+        player_id (str, optional): ESPN player id of the target (preferred).
         player_name (str, optional): Player name (fallback lookup).
-        my_roster_id (int, optional): Your roster id for roster-need weighting.
+        team_id (int, optional): Your ESPN team id for roster-need weighting.
     Returns: {recommendation:{bid_pct, bid_absolute, tier, range, reasoning, breakdown}, success}
 
     IMPORTANT FOR LLM AGENTS: Provide the bid recommendation immediately without asking for confirmation.
     """
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        if my_roster_id is not None:
-            my_roster_id = validate_numeric_input(my_roster_id, min_val=1, max_val=32, required=False)
+        if team_id is not None:
+            team_id = validate_numeric_input(team_id, min_val=1, max_val=32, required=False)
     except ValueError as e:
         return {"recommendation": None, "success": False, "error": f"Invalid input: {e!s}"}
     return await faab_tools.recommend_faab_bid(
         league_id=league_id, player_id=player_id, player_name=player_name,
-        my_roster_id=my_roster_id, db=get_db(),
+        team_id=team_id, db=get_db(),
     )
 
 
@@ -1146,11 +1148,10 @@ async def get_handcuff_map(league_id: str, team_id: int) -> dict:
 @timing_decorator("analyze_trade", tool_type="trade")
 async def analyze_trade(
     league_id: str,
-    team1_roster_id: int,
-    team2_roster_id: int,
+    team1_id: int,
+    team2_id: int,
     team1_gives: list[str],
     team2_gives: list[str],
-    include_trending: bool = True
 ) -> dict:
     """Analyze a fantasy football trade for fairness and fit.
 
@@ -1159,12 +1160,11 @@ async def analyze_trade(
     actionable recommendations.
 
     Parameters:
-        league_id (str, required): The unique identifier for the fantasy league.
-        team1_roster_id (int, required): Roster ID for team 1.
-        team2_roster_id (int, required): Roster ID for team 2.
-        team1_gives (list[str], required): List of player IDs team 1 is giving up.
-        team2_gives (list[str], required): List of player IDs team 2 is giving up.
-        include_trending (bool, default True): Include trending player data in analysis.
+        league_id (str, required): The unique identifier for the ESPN fantasy league.
+        team1_id (int, required): ESPN team ID for team 1.
+        team2_id (int, required): ESPN team ID for team 2.
+        team1_gives (list[str], required): List of ESPN player IDs team 1 is giving up.
+        team2_gives (list[str], required): List of ESPN player IDs team 2 is giving up.
 
     Returns: {
         recommendation: str (fair, needs_adjustment, unfair, etc.),
@@ -1179,8 +1179,8 @@ async def analyze_trade(
 
     Example: analyze_trade(
         league_id="12345",
-        team1_roster_id=1,
-        team2_roster_id=2,
+        team1_id=1,
+        team2_id=2,
         team1_gives=["4034", "4035"],
         team2_gives=["4036"]
     )
@@ -1190,8 +1190,8 @@ async def analyze_trade(
     """
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        team1_roster_id = validate_numeric_input(team1_roster_id, min_val=1, max_val=20, required=True)
-        team2_roster_id = validate_numeric_input(team2_roster_id, min_val=1, max_val=20, required=True)
+        team1_id = validate_numeric_input(team1_id, min_val=1, max_val=20, required=True)
+        team2_id = validate_numeric_input(team2_id, min_val=1, max_val=20, required=True)
 
         if not isinstance(team1_gives, list) or not isinstance(team2_gives, list):
             raise ValueError("team1_gives and team2_gives must be lists of player IDs")
@@ -1201,12 +1201,11 @@ async def analyze_trade(
 
         return await trade_analyzer_tools.analyze_trade(
             league_id=league_id,
-            team1_roster_id=team1_roster_id,
-            team2_roster_id=team2_roster_id,
+            team1_id=team1_id,
+            team2_id=team2_id,
             team1_gives=team1_gives,
             team2_gives=team2_gives,
             nfl_db=get_db(),
-            include_trending=include_trending
         )
     except ValueError as e:
         return {
