@@ -1,10 +1,9 @@
 """ESPN-core-only leaf-helper module (see ADR 0007).
 
-Mirrors the existing `sleeper_tools.py`/`sleeper_enrichment.py` public-surface/
-leaf-helper split: internal plumbing other modules import directly, never
-registered as MCP tools. Everything here is a pure ESPN-core call or an
-id-scheme-agnostic DB lookup, so it survives the Sleeper-to-ESPN cutover
-unchanged from its prior home in `sleeper_enrichment.py`.
+Internal plumbing other modules import directly, never registered as MCP
+tools. Everything here is a pure ESPN-core call or an id-scheme-agnostic DB
+lookup, relocated unchanged from the now-deleted Sleeper-era leaf-helper
+module during the Sleeper-to-ESPN cutover (issue #52).
 """
 import logging
 import os

@@ -271,15 +271,18 @@ Background data prefetching for optimal performance:
 
 - **Enable**: Set `NFL_MCP_PREFETCH=1`
 - **Interval**: `NFL_MCP_PREFETCH_INTERVAL` (default: 900 seconds = 15 min)
-- **Snap TTL**: `NFL_MCP_PREFETCH_SNAPS_TTL` (default: 900 seconds)
 - **Athletes refresh**: `NFL_MCP_PREFETCH_ATHLETES` (default: on) every `NFL_MCP_PREFETCH_ATHLETES_INTERVAL` (default: 86400 seconds = daily)
 
 The prefetch system automatically:
-1. Determines current season/week via NFL state
+1. Determines the current NFL week via ESPN-core's scoreboard
 2. Fetches team schedules (caches opponent data)
-3. Fetches player snap counts (caches usage data)
+3. Fetches injury reports and (Thu-Sat) practice-status reports
 4. Refreshes the athletes cache (player names/teams/positions) at startup and daily
 5. Refreshes on configured intervals
+
+Note: player-snap and usage-stat prefetching (Sleeper-sourced) were dropped in the
+Sleeper-to-ESPN cutover (issue #52) with no ESPN replacement decided yet (ADR 0008);
+`snap_pct`/`usage_last_3_weeks` enrichment still works from cached/estimated data.
 
 ### Robustness & Resilience
 
@@ -323,7 +326,6 @@ The server supports extensive configuration via environment variables:
 - `NFL_MCP_ADVANCED_ENRICH`: Enable advanced enrichment (0 or 1)
 - `NFL_MCP_PREFETCH`: Enable background prefetch (0 or 1)
 - `NFL_MCP_PREFETCH_INTERVAL`: Prefetch interval in seconds (default: 900)
-- `NFL_MCP_PREFETCH_SNAPS_TTL`: Snap data TTL in seconds (default: 900)
 - `NFL_MCP_PREFETCH_ATHLETES`: Refresh athletes cache during prefetch (0 or 1, default: 1)
 - `NFL_MCP_PREFETCH_ATHLETES_INTERVAL`: Athletes refresh interval in seconds (default: 86400)
 

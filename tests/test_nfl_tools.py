@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nfl_mcp.nfl_tools import (
-    get_current_season_and_week,
     get_depth_chart,
     get_league_leaders,
     get_nfl_news,
@@ -497,43 +496,6 @@ class TestGetLeagueLeaders:
             # Should succeed (even if no leaders found)
             assert result["success"] is True
             assert result["season"] == 2026
-
-
-class TestGetCurrentSeasonAndWeek:
-    """Test get_current_season_and_week function."""
-
-    @pytest.mark.asyncio
-    async def test_get_current_season_and_week_success(self):
-        """Test successful season/week detection."""
-        mock_state = {
-            "success": True,
-            "nfl_state": {
-                "season": 2026,
-                "week": 5
-            }
-        }
-
-        async def mock_get_nfl_state():
-            return mock_state
-
-        with patch('nfl_mcp.sleeper_tools.get_nfl_state', side_effect=mock_get_nfl_state):
-            season, week = await get_current_season_and_week()
-
-            assert season == 2026
-            assert week == 5
-
-    @pytest.mark.asyncio
-    async def test_get_current_season_and_week_failure(self):
-        """Test season/week detection failure returns defaults."""
-        async def mock_get_nfl_state():
-            raise Exception("API error")
-
-        with patch('nfl_mcp.sleeper_tools.get_nfl_state', side_effect=mock_get_nfl_state):
-            season, week = await get_current_season_and_week()
-
-            # Should return current year and week 0
-            assert season is not None
-            assert week == 0
 
 
 class TestAuditHighFixes:

@@ -70,22 +70,12 @@ SCENARIOS = [
         "expect": ["get_waiver_wire_dashboard", "get_waiver_log"],
         "args": {"league_id": "555"},
     },
-    {
-        "id": "trending",
-        "prompt": "Who are the most-added players across Sleeper right now?",
-        "expect": ["get_trending_players"],
-    },
     # --- Strategy -----------------------------------------------------------
     {
         "id": "playoff_odds",
         "prompt": "What are my playoff odds in league 555?",
         "expect": ["get_playoff_odds"],
         "args": {"league_id": "555"},
-    },
-    {
-        "id": "find_leagues",
-        "prompt": "My Sleeper username is gridiron_gary — find my leagues for the 2026 season.",
-        "expect": ["get_user", "get_user_leagues"],
     },
     {
         "id": "stacks",

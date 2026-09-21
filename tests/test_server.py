@@ -1321,21 +1321,17 @@ class TestAthletesRefresh:
         """The startup lifespan warm-up invokes the athletes refresh."""
         from unittest.mock import AsyncMock, MagicMock
 
-        from nfl_mcp import server, sleeper_tools
+        from nfl_mcp import nfl_enrichment, server
 
         # Enable the prefetch startup path without touching the environment.
         monkeypatch.setattr(server, "PREFETCH_ENABLED", True)
-        monkeypatch.setattr(sleeper_tools, "ADVANCED_ENRICH_ENABLED", True)
+        monkeypatch.setattr(nfl_enrichment, "ADVANCED_ENRICH_ENABLED", True)
         # Reset (and auto-restore) the task globals the lifespan mutates.
         monkeypatch.setattr(server, "_prefetch_task", None)
         monkeypatch.setattr(server, "_shutdown_event", None)
 
-        # Fast, network-free stubs for the schedule warm-up + background loop.
-        monkeypatch.setattr(
-            sleeper_tools, "get_nfl_state",
-            AsyncMock(return_value={"success": True, "nfl_state": {"season": "2026"}}),
-        )
-        monkeypatch.setattr(sleeper_tools, "_fetch_all_team_schedules", AsyncMock(return_value=[]))
+        # Fast, network-free stub for the schedule warm-up + background loop.
+        monkeypatch.setattr(nfl_enrichment, "_fetch_all_team_schedules", AsyncMock(return_value=[]))
         monkeypatch.setattr(server, "_prefetch_loop", AsyncMock())
 
         refresh = AsyncMock()

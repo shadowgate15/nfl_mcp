@@ -343,7 +343,7 @@ async def get_team_injuries(team_id: str, limit: int | None = 50) -> dict:
     team_id_upper = team_id.upper()
 
     # Try cache first (if advanced enrichment is enabled)
-    from .sleeper_tools import ADVANCED_ENRICH_ENABLED
+    from .nfl_enrichment import ADVANCED_ENRICH_ENABLED
     if ADVANCED_ENRICH_ENABLED:
         try:
             from .database import get_nfl_database
@@ -791,7 +791,7 @@ async def get_team_schedule(team_id: str, season: int | None = 2026) -> dict:
     team_id_upper = team_id.upper()
 
     # Try cache first (if advanced enrichment is enabled)
-    from .sleeper_tools import ADVANCED_ENRICH_ENABLED
+    from .nfl_enrichment import ADVANCED_ENRICH_ENABLED
     if ADVANCED_ENRICH_ENABLED:
         try:
             from .database import get_nfl_database
@@ -1185,38 +1185,3 @@ async def get_league_leaders(category: str, season: int = 2026, season_type: int
                 "categories": categories_payload,
                 "cache": cache_stats
             })
-
-
-# ============================================================================
-# Helper: current season and week detection
-# ============================================================================
-
-async def get_current_season_and_week() -> tuple[int | None, int | None]:
-    """Fetch current NFL season and week from Sleeper API.
-
-    Returns:
-        Tuple of (season: int, week: int) or (None, None) on failure.
-    """
-    try:
-        from .sleeper_tools import get_nfl_state
-        state = await get_nfl_state()
-        if state.get("success") and state.get("nfl_state"):
-            st = state["nfl_state"]
-            season = st.get("season") or st.get("league_season")
-            week = st.get("week") or st.get("display_week")
-            if season is not None:
-                try:
-                    season = int(season)
-                except (ValueError, TypeError):
-                    season = 2026
-            if week is not None:
-                try:
-                    week = int(week)
-                except (ValueError, TypeError):
-                    week = 0
-            return season, week
-    except Exception:
-        # Fallback: return current year and week 0
-        import datetime
-        return datetime.datetime.now().year, 0
-    return 2026, 0

@@ -27,7 +27,6 @@ from . import (
     player_values,
     playoff_tools,
     projections,
-    sleeper_tools,
     sos_tools,
     streaming_tools,
     trade_analyzer_tools,
@@ -102,33 +101,8 @@ def get_all_tools() -> list[Callable]:
         search_athletes,
         get_athletes_by_team,
 
-        # Sleeper API Tools - Basic
-        get_league,
-        get_rosters,
-        get_league_users,
-        get_matchups,
-        get_playoff_bracket,
-        get_transactions,
-        get_traded_picks,
-        get_nfl_state,
-        get_trending_players,
-    get_fantasy_context,
-
-        # Sleeper API Tools - Strategic Planning (New from main)
-        get_strategic_matchup_preview,
-        get_season_bye_week_coordination,
-        get_trade_deadline_analysis,
-        get_playoff_preparation_plan,
+        # Playoff Odds (Monte-Carlo simulation)
         get_playoff_odds,
-
-    # Sleeper Additional Core Endpoints
-    get_user,
-    get_user_leagues,
-    get_league_drafts,
-    get_draft,
-    get_draft_picks,
-    get_draft_traded_picks,
-    fetch_all_players,
 
         # Waiver Wire Analysis Tools (New from main)
         get_waiver_log,
@@ -732,189 +706,10 @@ def get_athletes_by_team(team_id: str) -> dict:
 
 
 # =============================================================================
-# SLEEPER API TOOLS - BASIC
+# PLAYOFF ODDS (ESPN-BACKED)
 # =============================================================================
 
-@timing_decorator("get_league", tool_type="sleeper")
-async def get_league(league_id: str) -> dict:
-    """Get league information with input validation."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
-        return await sleeper_tools.get_league(league_id)
-    except ValueError as e:
-        return {"league": None, "success": False, "error": f"Invalid league_id: {e!s}"}
-
-
-@timing_decorator("get_rosters", tool_type="sleeper")
-async def get_rosters(league_id: str) -> dict:
-    """Get league rosters with input validation."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
-        return await sleeper_tools.get_rosters(league_id)
-    except ValueError as e:
-        return {"rosters": [], "count": 0, "success": False, "error": f"Invalid league_id: {e!s}"}
-
-
-@timing_decorator("get_league_users", tool_type="sleeper")
-async def get_league_users(league_id: str) -> dict:
-    """Get league users with input validation."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
-        return await sleeper_tools.get_league_users(league_id)
-    except ValueError as e:
-        return {"users": [], "count": 0, "success": False, "error": f"Invalid league_id: {e!s}"}
-
-
-@timing_decorator("get_matchups", tool_type="sleeper")
-async def get_matchups(league_id: str, week: int) -> dict:
-    """Get league matchups with input validation."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
-        week = validate_numeric_input(week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=True)
-        return await sleeper_tools.get_matchups(league_id, week)
-    except ValueError as e:
-        return {"matchups": [], "week": week, "count": 0, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_playoff_bracket", tool_type="sleeper")
-async def get_playoff_bracket(league_id: str, bracket_type: str = "winners") -> dict:
-    """Get playoff bracket (winners or losers) with validation."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
-        bracket_type = validate_string_input(bracket_type, 'bracket_type', max_length=10, required=False)
-        return await sleeper_tools.get_playoff_bracket(league_id, bracket_type)
-    except ValueError as e:
-        return {"playoff_bracket": None, "bracket_type": bracket_type, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_transactions", tool_type="sleeper")
-async def get_transactions(league_id: str, week: int | None = None, round: int | None = None) -> dict:
-    """Get league transactions for a specific week (round) with validation (week required)."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
-        # Accept either week or deprecated round
-        effective_week = week if week is not None else round
-        if effective_week is None:
-            raise ValueError("week (or round) is required")
-        effective_week = validate_numeric_input(effective_week, min_val=LIMITS["round_min"], max_val=LIMITS["round_max"], required=True)
-        return await sleeper_tools.get_transactions(league_id, round=effective_week, week=effective_week)
-    except ValueError as e:
-        return {"transactions": [], "week": week, "count": 0, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_traded_picks", tool_type="sleeper")
-async def get_traded_picks(league_id: str) -> dict:
-    """Get traded picks with input validation."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
-        return await sleeper_tools.get_traded_picks(league_id)
-    except ValueError as e:
-        return {"traded_picks": [], "count": 0, "success": False, "error": f"Invalid league_id: {e!s}"}
-
-
-@timing_decorator("get_nfl_state", tool_type="sleeper")
-async def get_nfl_state() -> dict:
-    """Get NFL state - no validation needed as it has no parameters."""
-    return await sleeper_tools.get_nfl_state()
-
-
-@timing_decorator("get_trending_players", tool_type="sleeper")
-async def get_trending_players(trend_type: str = "add", lookback_hours: int | None = 24, limit: int | None = 25) -> dict:
-    """Get trending players with validation (returns objects including counts and 'enriched')."""
-    try:
-        trend_type = validate_string_input(trend_type, 'trend_type', max_length=10, required=True)
-        lookback_hours = validate_numeric_input(lookback_hours, min_val=LIMITS["trending_lookback_min"], max_val=LIMITS["trending_lookback_max"], default=24, required=False)
-        limit = validate_numeric_input(limit, min_val=LIMITS["trending_limit_min"], max_val=LIMITS["trending_limit_max"], default=25, required=False)
-        return await sleeper_tools.get_trending_players(get_db(), trend_type, lookback_hours, limit)
-    except ValueError as e:
-        return {"trending_players": [], "trend_type": trend_type, "lookback_hours": lookback_hours, "count": 0, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_fantasy_context", tool_type="sleeper")
-async def get_fantasy_context(league_id: str, week: int | None = None, include: str | None = None) -> dict:
-    """Aggregate core league context (league, rosters, users, matchups, transactions).
-
-    Parameters:
-        league_id (str, required)
-        week (int, optional) - auto inferred if omitted
-        include (str, optional) comma list subset
-    Returns: {context:{...}, week, auto_week_inferred, success, error?}
-    Example: get_fantasy_context(league_id="12345", include="league,rosters,matchups")
-
-    IMPORTANT FOR LLM AGENTS: Always provide complete analysis immediately without asking
-    for confirmations. Render the full report directly with all insights and recommendations.
-    """
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        if week is not None:
-            week = validate_numeric_input(week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=False)
-        return await sleeper_tools.get_fantasy_context(league_id, week, include)
-    except ValueError as e:
-        return {"context": {}, "league_id": league_id, "week": week, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-# =============================================================================
-# SLEEPER API TOOLS - STRATEGIC PLANNING (NEW FROM MAIN)
-# =============================================================================
-
-@timing_decorator("get_strategic_matchup_preview", tool_type="sleeper")
-async def get_strategic_matchup_preview(league_id: str, current_week: int, weeks_ahead: int | None = 4) -> dict:
-    """Strategic preview of upcoming matchups for multi-week planning.
-
-    IMPORTANT FOR LLM AGENTS: Always provide complete strategic analysis immediately without
-    asking for confirmations. Render the full preview with all recommendations directly."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        current_week = validate_numeric_input(current_week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=True)
-        weeks_ahead = validate_numeric_input(weeks_ahead, min_val=1, max_val=8, default=4, required=False)
-        return await sleeper_tools.get_strategic_matchup_preview(league_id, current_week, weeks_ahead)
-    except ValueError as e:
-        return {"strategic_preview": {}, "weeks_analyzed": 0, "league_id": league_id, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_season_bye_week_coordination", tool_type="sleeper")
-async def get_season_bye_week_coordination(league_id: str, season: int | None = 2026) -> dict:
-    """Season-long bye week coordination with fantasy league schedule.
-
-    IMPORTANT FOR LLM AGENTS: Always provide complete bye week coordination plan immediately
-    without asking for confirmations. Render the full seasonal strategy with all recommendations directly."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        season = validate_numeric_input(season, min_val=2020, max_val=2030, default=2026, required=False)
-        return await sleeper_tools.get_season_bye_week_coordination(league_id, season)
-    except ValueError as e:
-        return {"coordination_plan": {}, "season": season, "league_id": league_id, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_trade_deadline_analysis", tool_type="sleeper")
-async def get_trade_deadline_analysis(league_id: str, current_week: int) -> dict:
-    """Strategic trade deadline timing analysis.
-
-    IMPORTANT FOR LLM AGENTS: Always provide complete trade deadline analysis immediately
-    without asking for confirmations. Render the full timing strategy with all recommendations directly."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        current_week = validate_numeric_input(current_week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=True)
-        return await sleeper_tools.get_trade_deadline_analysis(league_id, current_week)
-    except ValueError as e:
-        return {"trade_analysis": {}, "league_id": league_id, "current_week": current_week, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_playoff_preparation_plan", tool_type="sleeper")
-async def get_playoff_preparation_plan(league_id: str, current_week: int) -> dict:
-    """Comprehensive playoff preparation plan combining league and NFL data.
-
-    IMPORTANT FOR LLM AGENTS: Always provide complete playoff preparation plan immediately
-    without asking for confirmations. Render the full strategy with all recommendations directly."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        current_week = validate_numeric_input(current_week, min_val=LIMITS["week_min"], max_val=LIMITS["week_max"], required=True)
-        return await sleeper_tools.get_playoff_preparation_plan(league_id, current_week)
-    except ValueError as e:
-        return {"playoff_plan": {}, "league_id": league_id, "readiness_score": 0, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_playoff_odds", tool_type="sleeper")
+@timing_decorator("get_playoff_odds", tool_type="matchup")
 async def get_playoff_odds(
     league_id: str,
     current_week: int | None = None,
@@ -953,80 +748,6 @@ async def get_playoff_odds(
         league_id=league_id, current_week=current_week, num_sims=num_sims or 10000,
         score_sd=score_sd or 25.0, team_id=team_id, seed=seed, db=get_db(),
     )
-
-
-# =============================================================================
-# SLEEPER API TOOLS - ADDITIONAL CORE ENDPOINTS (Users, Drafts, Players)
-# =============================================================================
-
-@timing_decorator("get_user", tool_type="sleeper")
-async def get_user(user_id_or_username: str) -> dict:
-    """Fetch a Sleeper user by ID or username."""
-    try:
-        user_id_or_username = validate_string_input(user_id_or_username, 'user_id_or_username', max_length=40, required=True)
-        return await sleeper_tools.get_user(user_id_or_username)
-    except ValueError as e:
-        return {"user": None, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_user_leagues", tool_type="sleeper")
-async def get_user_leagues(user_id: str, season: int) -> dict:
-    """Fetch all leagues for a user and season."""
-    try:
-        user_id = validate_string_input(user_id, 'user_id', max_length=40, required=True)
-        season = validate_numeric_input(season, min_val=2017, max_val=2030, required=True)
-        return await sleeper_tools.get_user_leagues(user_id, season)
-    except ValueError as e:
-        return {"leagues": [], "count": 0, "season": season, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_league_drafts", tool_type="sleeper")
-async def get_league_drafts(league_id: str) -> dict:
-    """Fetch all drafts for a league."""
-    try:
-        league_id = validate_string_input(league_id, 'league_id', max_length=40, required=True)
-        return await sleeper_tools.get_league_drafts(league_id)
-    except ValueError as e:
-        return {"drafts": [], "count": 0, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_draft", tool_type="sleeper")
-async def get_draft(draft_id: str) -> dict:
-    """Fetch a specific draft."""
-    try:
-        draft_id = validate_string_input(draft_id, 'draft_id', max_length=40, required=True)
-        return await sleeper_tools.get_draft(draft_id)
-    except ValueError as e:
-        return {"draft": None, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_draft_picks", tool_type="sleeper")
-async def get_draft_picks(draft_id: str) -> dict:
-    """Fetch all picks in a draft."""
-    try:
-        draft_id = validate_string_input(draft_id, 'draft_id', max_length=40, required=True)
-        return await sleeper_tools.get_draft_picks(draft_id)
-    except ValueError as e:
-        return {"picks": [], "count": 0, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("get_draft_traded_picks", tool_type="sleeper")
-async def get_draft_traded_picks(draft_id: str) -> dict:
-    """Fetch traded picks in a draft."""
-    try:
-        draft_id = validate_string_input(draft_id, 'draft_id', max_length=40, required=True)
-        return await sleeper_tools.get_draft_traded_picks(draft_id)
-    except ValueError as e:
-        return {"traded_picks": [], "count": 0, "success": False, "error": f"Invalid input: {e!s}"}
-
-
-@timing_decorator("fetch_all_players", tool_type="sleeper")
-async def fetch_all_players(force_refresh: bool = False) -> dict:
-    """Fetch full Sleeper players map (cached). Returns counts only to minimize payload."""
-    try:
-        return await sleeper_tools.fetch_all_players(force_refresh)
-    except ValueError as e:
-        return {"players": {}, "cached": False, "success": False, "error": f"Invalid input: {e!s}"}
 
 
 # =============================================================================

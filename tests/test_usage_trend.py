@@ -1,5 +1,5 @@
 """Tests for usage trend calculation."""
-from nfl_mcp.sleeper_tools import _calculate_usage_trend
+from nfl_mcp.nfl_enrichment import _calculate_usage_trend
 
 
 class TestUsageTrend:
