@@ -7,8 +7,8 @@ gut feeling. This turns a bid into a data-driven number by combining:
     - the player's real market value      (player_values / FantasyCalc)
     - the marginal upgrade for YOUR roster (value over your current starter at
       that position)
-    - league demand                        (how many managers are adding him -
-      get_trending_players)
+    - league demand                        (no ESPN equivalent to Sleeper's
+      trending-adds signal -- frozen at neutral, see demand_label)
     - budget & timing                      (your remaining FAAB, weeks left)
 
 Output is a recommended bid as a percentage of the total FAAB budget (plus an
@@ -21,8 +21,9 @@ from __future__ import annotations
 import logging
 
 from .errors import ErrorType, create_error_response, create_success_response, handle_http_errors
+from .espn_fantasy_tools import enrich_roster, get_espn_league, get_espn_rosters
+from .nfl_enrichment import get_current_nfl_week
 from .player_values import get_values_service
-from .sleeper_tools import get_league, get_nfl_state, get_rosters, get_trending_players
 from .trade_analyzer_tools import league_format_from_settings
 
 logger = logging.getLogger(__name__)
@@ -52,16 +53,16 @@ async def recommend_faab_bid(
     league_id: str,
     player_id: str | None = None,
     player_name: str | None = None,
-    my_roster_id: int | None = None,
+    team_id: int | None = None,
     db=None,
 ) -> dict:
     """Recommend a FAAB waiver bid for a player (as % of budget, + absolute).
 
     Args:
-        league_id: Sleeper league id.
-        player_id: Sleeper player id of the target (preferred).
+        league_id: ESPN league id.
+        player_id: ESPN player id of the target (preferred).
         player_name: Player name (fallback lookup).
-        my_roster_id: Your roster id — enables roster-need (marginal upgrade)
+        team_id: Your ESPN team id — enables roster-need (marginal upgrade)
             weighting. Without it, the bid reflects absolute value + demand only.
 
     Returns: {recommendation: {bid_pct, bid_absolute, range, tier, reasoning,
@@ -72,15 +73,16 @@ async def recommend_faab_bid(
                                      {"recommendation": None})
 
     # --- League format + budget context ---
-    league_res = await get_league(league_id)
+    league_res = await get_espn_league(league_id)
     if not league_res.get("success") or not league_res.get("league"):
         return create_error_response(f"Could not load league: {league_res.get('error')}",
                                      ErrorType.HTTP, {"recommendation": None})
     league = league_res["league"]
     fmt = league_format_from_settings(league)
     settings = league.get("settings", {}) or {}
-    total_budget = settings.get("waiver_budget", 0) or 0
-    is_faab = settings.get("waiver_type") == 2 and total_budget > 0
+    acquisition = settings.get("acquisitionSettings", {}) or {}
+    total_budget = acquisition.get("acquisitionBudget") or 0
+    is_faab = bool(acquisition.get("isUsingAcquisitionBudget")) and total_budget > 0
 
     # --- Values ---
     service = get_values_service(db)
@@ -102,16 +104,18 @@ async def recommend_faab_bid(
     # --- Marginal upgrade vs your roster ---
     upgrade = target_value
     replacement_value = 0.0
-    my_roster = None
-    if my_roster_id is not None:
-        rosters_res = await get_rosters(league_id)
-        for r in (rosters_res.get("rosters", []) if rosters_res.get("success") else []):
-            if r.get("roster_id") == my_roster_id:
-                my_roster = r
+    my_team = None
+    if team_id is not None:
+        rosters_res = await get_espn_rosters(league_id, detail="full")
+        for t in (rosters_res.get("rosters", []) if rosters_res.get("success") else []):
+            if t.get("id") == team_id:
+                my_team = t
                 break
-        if my_roster is not None:
+        if my_team is not None:
+            entries = (my_team.get("roster") or {}).get("entries") or []
+            my_players_enriched = enrich_roster(entries, db)
             my_pos_vals = []
-            for p in my_roster.get("players_enriched", []):
+            for p in my_players_enriched:
                 if (p.get("position") or "").upper() == position:
                     v = service.lookup(values, player_id=p.get("player_id"), name=p.get("full_name"))
                     if v and v.get("value") is not None:
@@ -124,36 +128,21 @@ async def recommend_faab_bid(
             if upgrade <= 0:
                 warnings.append(f"You're already strong at {position} — this is depth, not an upgrade")
         else:
-            warnings.append(f"Roster {my_roster_id} not found; bidding on absolute value only")
+            warnings.append(f"Team {team_id} not found; bidding on absolute value only")
 
     value_score = min(1.0, target_value / max_value) if max_value else 0.0
     upgrade_score = min(1.0, (upgrade / target_value)) if target_value else 0.0
 
-    # --- Demand (how contested is he) ---
+    # --- Demand: ESPN has no trending-players signal (issue #50) — frozen at
+    # neutral rather than fabricating a contested-demand level.
     demand_mult = 1.0
-    demand_label = "low"
-    try:
-        trend = await get_trending_players(db, "add", 48, 100)
-        if trend.get("success"):
-            order = [str(tp.get("player_id")) for tp in trend.get("trending_players", [])]
-            pid = str(target.get("player_id"))
-            if pid in order:
-                idx = order.index(pid)
-                if idx < 10:
-                    demand_mult, demand_label = 1.30, "high"
-                elif idx < 30:
-                    demand_mult, demand_label = 1.15, "moderate"
-                else:
-                    demand_mult, demand_label = 1.05, "light"
-    except Exception as e:
-        logger.debug(f"trending fetch failed: {e}")
+    demand_label = "unavailable"
 
     # --- Timing (weeks left) ---
     timing_mult = 1.0
     weeks_left = None
     try:
-        state = await get_nfl_state()
-        wk = state.get("nfl_state", {}).get("week") if state.get("success") else None
+        wk = await get_current_nfl_week()
         if wk:
             weeks_left = max(0, _FANTASY_REGULAR_WEEKS - int(wk))
             if weeks_left <= 3:
@@ -172,7 +161,7 @@ async def recommend_faab_bid(
     bid_absolute = None
     aggressive_abs = safe_abs = None
     if is_faab:
-        used = (my_roster.get("settings", {}) or {}).get("waiver_budget_used") if my_roster else None
+        used = (my_team.get("transactionCounter", {}) or {}).get("acquisitionBudgetSpent") if my_team else None
         remaining_budget = (total_budget - used) if used is not None else total_budget
         bid_absolute = round(bid_pct / 100.0 * total_budget)
         if remaining_budget is not None:
@@ -187,8 +176,8 @@ async def recommend_faab_bid(
     reasoning = [
         f"Market value {int(target_value)} ({position} #{target.get('position_rank')})",
         (f"Marginal upgrade for you: +{int(upgrade)} over your replacement ({int(replacement_value)})"
-         if my_roster_id is not None else "No roster context — absolute value used"),
-        f"League demand: {demand_label}",
+         if team_id is not None else "No roster context — absolute value used"),
+        "League demand: unavailable — ESPN has no trending-adds signal, so demand isn't weighted into this bid",
     ]
     if weeks_left is not None:
         reasoning.append(f"{weeks_left} regular-season weeks left")
@@ -208,6 +197,7 @@ async def recommend_faab_bid(
                 "value_score": round(value_score, 3),
                 "upgrade_score": round(upgrade_score, 3),
                 "demand_mult": demand_mult,
+                "demand_label": demand_label,
                 "timing_mult": timing_mult,
                 "base_pct": round(base_pct, 1),
             },

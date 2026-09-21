@@ -16,8 +16,33 @@ class _FakeService:
     def __init__(self, by_id=None):
         self._by_id = {str(k): v for k, v in (by_id or {}).items()}
 
+    async def get_values(self, **kwargs):
+        return {"source": "fantasycalc", "stale": False,
+                "list": list(self._by_id.values()), "by_id": self._by_id}
+
     def lookup(self, indexed, player_id=None, name=None, position=None):
         return self._by_id.get(str(player_id))
+
+
+def _entry(player_id, position_id=2, lineup_slot_id=20):
+    """Raw ESPN roster entry: `playerPoolEntry.player` nesting, `detail="full"` shape."""
+    return {
+        "lineupSlotId": lineup_slot_id,
+        "playerPoolEntry": {"player": {
+            "id": player_id, "fullName": f"Player {player_id}", "defaultPositionId": position_id,
+        }},
+    }
+
+
+def _espn_league():
+    return {"success": True, "league": {
+        "settings": {
+            "scoringSettings": {"scoringItems": [{"statId": 53, "points": 1.0}]},
+            "rosterSettings": {"lineupSlotCounts": {"0": 1, "2": 2, "4": 2, "6": 1}},
+            "size": 12,
+            "draftSettings": {"keeperCount": 0},
+        },
+    }}
 
 
 class TestTradeAnalyzerModule:
@@ -185,8 +210,8 @@ class TestTradeAnalyzerIntegration:
         """Test analyze_trade with missing required parameters."""
         result = await trade_analyzer_tools.analyze_trade(
             league_id="",
-            team1_roster_id=1,
-            team2_roster_id=2,
+            team1_id=1,
+            team2_id=2,
             team1_gives=[],
             team2_gives=["4034"]
         )
@@ -198,7 +223,7 @@ class TestTradeAnalyzerIntegration:
     @pytest.mark.asyncio
     async def test_analyze_trade_rosters_fetch_fails(self):
         """Test analyze_trade when roster fetch fails."""
-        with patch('nfl_mcp.trade_analyzer_tools.get_rosters') as mock_get_rosters:
+        with patch('nfl_mcp.trade_analyzer_tools.get_espn_rosters') as mock_get_rosters:
             mock_get_rosters.return_value = {
                 "success": False,
                 "error": "API error",
@@ -207,8 +232,8 @@ class TestTradeAnalyzerIntegration:
 
             result = await trade_analyzer_tools.analyze_trade(
                 league_id="12345",
-                team1_roster_id=1,
-                team2_roster_id=2,
+                team1_id=1,
+                team2_id=2,
                 team1_gives=["4034"],
                 team2_gives=["4035"]
             )
@@ -219,20 +244,20 @@ class TestTradeAnalyzerIntegration:
 
     @pytest.mark.asyncio
     async def test_analyze_trade_roster_not_found(self):
-        """Test analyze_trade when roster IDs don't exist."""
-        with patch('nfl_mcp.trade_analyzer_tools.get_rosters') as mock_get_rosters:
+        """Test analyze_trade when team IDs don't exist."""
+        with patch('nfl_mcp.trade_analyzer_tools.get_espn_rosters') as mock_get_rosters:
             mock_get_rosters.return_value = {
                 "success": True,
                 "rosters": [
-                    {"roster_id": 5, "players_enriched": [], "starters_enriched": []},
-                    {"roster_id": 6, "players_enriched": [], "starters_enriched": []}
+                    {"id": 5, "roster": {"entries": []}},
+                    {"id": 6, "roster": {"entries": []}}
                 ]
             }
 
             result = await trade_analyzer_tools.analyze_trade(
                 league_id="12345",
-                team1_roster_id=1,
-                team2_roster_id=2,
+                team1_id=1,
+                team2_id=2,
                 team1_gives=["4034"],
                 team2_gives=["4035"]
             )
@@ -244,46 +269,36 @@ class TestTradeAnalyzerIntegration:
     @pytest.mark.asyncio
     async def test_analyze_trade_successful_basic(self):
         """Test successful trade analysis with basic data."""
-        with patch('nfl_mcp.trade_analyzer_tools.get_rosters') as mock_get_rosters:
+        with patch('nfl_mcp.trade_analyzer_tools.get_espn_rosters') as mock_get_rosters:
             mock_get_rosters.return_value = {
                 "success": True,
                 "rosters": [
                     {
-                        "roster_id": 1,
-                        "players_enriched": [
-                            {"player_id": "4034", "full_name": "Patrick Mahomes", "position": "QB"},
-                            {"player_id": "4035", "full_name": "Christian McCaffrey", "position": "RB"}
-                        ],
-                        "starters_enriched": [
-                            {"player_id": "4034", "full_name": "Patrick Mahomes", "position": "QB"}
-                        ]
+                        "id": 1,
+                        "roster": {"entries": [
+                            _entry("4034", position_id=0),  # QB
+                            _entry("4035", position_id=2),  # RB
+                        ]},
                     },
                     {
-                        "roster_id": 2,
-                        "players_enriched": [
-                            {"player_id": "4036", "full_name": "Justin Jefferson", "position": "WR"},
-                            {"player_id": "4037", "full_name": "Travis Kelce", "position": "TE"}
-                        ],
-                        "starters_enriched": [
-                            {"player_id": "4036", "full_name": "Justin Jefferson", "position": "WR"}
-                        ]
-                    }
+                        "id": 2,
+                        "roster": {"entries": [
+                            _entry("4036", position_id=3),  # WR
+                            _entry("4037", position_id=6),  # TE
+                        ]},
+                    },
                 ]
             }
 
-            with patch('nfl_mcp.trade_analyzer_tools.get_trending_players') as mock_trending:
-                mock_trending.return_value = {
-                    "success": True,
-                    "trending_players": []
-                }
+            with patch('nfl_mcp.trade_analyzer_tools.get_espn_league') as mock_get_league:
+                mock_get_league.return_value = _espn_league()
 
                 result = await trade_analyzer_tools.analyze_trade(
                     league_id="12345",
-                    team1_roster_id=1,
-                    team2_roster_id=2,
+                    team1_id=1,
+                    team2_id=2,
                     team1_gives=["4034"],
                     team2_gives=["4036"],
-                    include_trending=True
                 )
 
                 assert result["success"] is True
@@ -295,100 +310,50 @@ class TestTradeAnalyzerIntegration:
                 assert "warnings" in result
 
                 # Check team1 analysis structure
-                assert result["team1_analysis"]["roster_id"] == 1
+                assert result["team1_analysis"]["team_id"] == 1
                 assert len(result["team1_analysis"]["gives"]) == 1
                 assert len(result["team1_analysis"]["receives"]) == 1
                 assert "positional_needs" in result["team1_analysis"]
 
                 # Check team2 analysis structure
-                assert result["team2_analysis"]["roster_id"] == 2
+                assert result["team2_analysis"]["team_id"] == 2
                 assert len(result["team2_analysis"]["gives"]) == 1
                 assert len(result["team2_analysis"]["receives"]) == 1
 
     @pytest.mark.asyncio
-    async def test_analyze_trade_with_injured_player_warning(self):
-        """Test trade analysis generates warning for injured players."""
-        with patch('nfl_mcp.trade_analyzer_tools.get_rosters') as mock_get_rosters:
-            mock_get_rosters.return_value = {
-                "success": True,
-                "rosters": [
-                    {
-                        "roster_id": 1,
-                        "players_enriched": [
-                            {
-                                "player_id": "4034",
-                                "full_name": "Injured Player",
-                                "position": "RB",
-                                "practice_status": "DNP"
-                            }
-                        ],
-                        "starters_enriched": []
-                    },
-                    {
-                        "roster_id": 2,
-                        "players_enriched": [
-                            {"player_id": "4036", "full_name": "Healthy Player", "position": "WR"}
-                        ],
-                        "starters_enriched": []
-                    }
-                ]
-            }
-
-            with patch('nfl_mcp.trade_analyzer_tools.get_trending_players') as mock_trending:
-                mock_trending.return_value = {"success": False}
-
-                result = await trade_analyzer_tools.analyze_trade(
-                    league_id="12345",
-                    team1_roster_id=1,
-                    team2_roster_id=2,
-                    team1_gives=["4034"],
-                    team2_gives=["4036"],
-                    include_trending=False
-                )
-
-                assert result["success"] is True
-                assert len(result["warnings"]) > 0
-                # Should have a warning about DNP status
-                dnp_warnings = [w for w in result["warnings"] if "DNP" in w]
-                assert len(dnp_warnings) > 0
-
-    @pytest.mark.asyncio
     async def test_analyze_trade_multi_player_trade(self):
         """Test trade analysis with multiple players on each side."""
-        with patch('nfl_mcp.trade_analyzer_tools.get_rosters') as mock_get_rosters:
+        with patch('nfl_mcp.trade_analyzer_tools.get_espn_rosters') as mock_get_rosters:
             mock_get_rosters.return_value = {
                 "success": True,
                 "rosters": [
                     {
-                        "roster_id": 1,
-                        "players_enriched": [
-                            {"player_id": "1", "full_name": "Player 1", "position": "RB"},
-                            {"player_id": "2", "full_name": "Player 2", "position": "WR"},
-                            {"player_id": "3", "full_name": "Player 3", "position": "RB"}
-                        ],
-                        "starters_enriched": []
+                        "id": 1,
+                        "roster": {"entries": [
+                            _entry("1", position_id=2),
+                            _entry("2", position_id=3),
+                            _entry("3", position_id=2),
+                        ]},
                     },
                     {
-                        "roster_id": 2,
-                        "players_enriched": [
-                            {"player_id": "4", "full_name": "Player 4", "position": "QB"},
-                            {"player_id": "5", "full_name": "Player 5", "position": "TE"}
-                        ],
-                        "starters_enriched": []
-                    }
+                        "id": 2,
+                        "roster": {"entries": [
+                            _entry("4", position_id=0),
+                            _entry("5", position_id=6),
+                        ]},
+                    },
                 ]
             }
 
-            with patch('nfl_mcp.trade_analyzer_tools.get_trending_players') as mock_trending:
-                mock_trending.return_value = {"success": False}
+            with patch('nfl_mcp.trade_analyzer_tools.get_espn_league') as mock_get_league:
+                mock_get_league.return_value = _espn_league()
 
                 result = await trade_analyzer_tools.analyze_trade(
                     league_id="12345",
-                    team1_roster_id=1,
-                    team2_roster_id=2,
+                    team1_id=1,
+                    team2_id=2,
                     team1_gives=["1", "2"],
                     team2_gives=["4", "5"],
-                    include_trending=False
                 )
 
                 assert result["success"] is True
@@ -418,8 +383,8 @@ class TestTradeAnalyzerToolRegistry:
         # Test with invalid league_id (too long)
         result = await tool_registry.analyze_trade(
             league_id="a" * 100,  # Too long
-            team1_roster_id=1,
-            team2_roster_id=2,
+            team1_id=1,
+            team2_id=2,
             team1_gives=["4034"],
             team2_gives=["4035"]
         )
@@ -435,8 +400,8 @@ class TestTradeAnalyzerToolRegistry:
         # Test with empty team1_gives
         result = await tool_registry.analyze_trade(
             league_id="12345",
-            team1_roster_id=1,
-            team2_roster_id=2,
+            team1_id=1,
+            team2_id=2,
             team1_gives=[],
             team2_gives=["4035"]
         )

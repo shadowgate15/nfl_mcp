@@ -10,8 +10,8 @@ import logging
 from collections import defaultdict
 
 from .errors import ErrorType, create_error_response, create_success_response
+from .espn_fantasy_tools import enrich_roster, get_espn_league, get_espn_rosters
 from .player_values import get_values_service
-from .sleeper_tools import get_league, get_rosters, get_trending_players
 
 logger = logging.getLogger(__name__)
 
@@ -19,27 +19,53 @@ logger = logging.getLogger(__name__)
 # list (deep bench / K / DST). Low but non-zero so they still count for depth.
 ESTIMATED_REPLACEMENT_VALUE = 150.0
 
+# ESPN's PPR rule lives at `scoringSettings.scoringItems[].statId == 53`
+# ("Each reception"); a league missing that item is full PPR, not zero PPR
+# (ADR 0007).
+_PPR_STAT_ID = 53
+# `rosterSettings.lineupSlotCounts` keys (confirmed ESPN slot ids, ADR 0007):
+# the QB slot and the superflex-eligible "OP" (Offensive Player) slot.
+_QB_SLOT_ID = "0"
+_SUPERFLEX_SLOT_ID = "7"
+# `lineupSlotId` values that mark a roster entry as not a starter.
+BENCH_SLOT_ID = 20
+IR_SLOT_ID = 21
+
 
 def league_format_from_settings(league: dict | None) -> dict:
-    """Derive value format (ppr, superflex, teams, dynasty) from a Sleeper league."""
+    """Derive value format (ppr, superflex, teams, dynasty) from an ESPN league's settings."""
     league = league or {}
-    scoring = league.get("scoring_settings") or {}
-    ppr = scoring.get("rec", 0) or 0
-    try:
-        ppr = float(ppr)
-    except (TypeError, ValueError):
-        ppr = 0.0
-    roster_positions = league.get("roster_positions") or []
-    qb_slots = sum(1 for p in roster_positions if p == "QB")
-    superflex = ("SUPER_FLEX" in roster_positions) or ("QB" in [p for p in roster_positions if p == "QB"] and qb_slots >= 2)
-    num_teams = league.get("total_rosters") or len(league.get("rosters", []) or []) or 12
-    # Sleeper league settings.type: 0=redraft, 1=keeper, 2=dynasty
-    dynasty = (league.get("settings", {}) or {}).get("type") == 2
+    settings = league.get("settings") or {}
+
+    scoring_items = (settings.get("scoringSettings") or {}).get("scoringItems") or []
+    ppr = 1.0
+    for item in scoring_items:
+        if item.get("statId") == _PPR_STAT_ID:
+            try:
+                ppr = float(item.get("points") or 0.0)
+            except (TypeError, ValueError):
+                ppr = 0.0
+            break
+
+    lineup_slot_counts = (settings.get("rosterSettings") or {}).get("lineupSlotCounts") or {}
+    qb_slots = int(lineup_slot_counts.get(_QB_SLOT_ID, 0) or 0)
+    superflex_slots = int(lineup_slot_counts.get(_SUPERFLEX_SLOT_ID, 0) or 0)
+    superflex = superflex_slots > 0 or qb_slots >= 2
+
+    num_teams = settings.get("size") or 12
+
+    # ESPN has no field anywhere distinguishing redraft, keeper, and dynasty
+    # the way Sleeper's three-way settings.type enum did; keeperCount > 0 is
+    # the closest available signal -- a permanent loss of that finer
+    # distinction, confirmed as ESPN's actual ceiling (ADR 0007).
+    keeper_count = int((settings.get("draftSettings") or {}).get("keeperCount") or 0)
+    is_dynasty = keeper_count > 0
+
     return {
         "ppr": ppr,
         "num_qbs": 2 if superflex else 1,
         "num_teams": int(num_teams),
-        "is_dynasty": bool(dynasty),
+        "is_dynasty": is_dynasty,
         "superflex": bool(superflex),
     }
 
@@ -244,12 +270,11 @@ class TradeAnalyzer:
 
 async def analyze_trade(
     league_id: str,
-    team1_roster_id: int,
-    team2_roster_id: int,
+    team1_id: int,
+    team2_id: int,
     team1_gives: list[str],
     team2_gives: list[str],
     nfl_db=None,
-    include_trending: bool = True
 ) -> dict:
     """
     Analyze a fantasy football trade for fairness and fit.
@@ -261,13 +286,12 @@ async def analyze_trade(
     - Providing actionable recommendations
 
     Args:
-        league_id: The unique identifier for the fantasy league
-        team1_roster_id: Roster ID for team 1 (giving team1_gives)
-        team2_roster_id: Roster ID for team 2 (giving team2_gives)
-        team1_gives: List of player IDs that team 1 is giving up
-        team2_gives: List of player IDs that team 2 is giving up
+        league_id: The ESPN fantasy league id
+        team1_id: ESPN team id for team 1 (giving team1_gives)
+        team2_id: ESPN team id for team 2 (giving team2_gives)
+        team1_gives: List of ESPN player IDs that team 1 is giving up
+        team2_gives: List of ESPN player IDs that team 2 is giving up
         nfl_db: Database instance for player lookups (optional)
-        include_trending: Whether to include trending player data (default: True)
 
     Returns:
         A dictionary containing:
@@ -292,8 +316,9 @@ async def analyze_trade(
                 {"recommendation": None, "fairness_score": 0}
             )
 
-        # Fetch league rosters
-        rosters_result = await get_rosters(league_id)
+        # Fetch league rosters (detail="full" -- enrich_roster needs each
+        # entry's nested player object, which summary-trimmed entries discard).
+        rosters_result = await get_espn_rosters(league_id, detail="full")
         if not rosters_result.get("success"):
             return create_error_response(
                 f"Failed to fetch rosters: {rosters_result.get('error')}",
@@ -303,14 +328,14 @@ async def analyze_trade(
 
         rosters = rosters_result.get("rosters", [])
 
-        # Find the two rosters involved
+        # Find the two teams involved
         team1_roster = None
         team2_roster = None
 
         for roster in rosters:
-            if roster.get("roster_id") == team1_roster_id:
+            if roster.get("id") == team1_id:
                 team1_roster = roster
-            elif roster.get("roster_id") == team2_roster_id:
+            elif roster.get("id") == team2_id:
                 team2_roster = roster
 
         if not team1_roster or not team2_roster:
@@ -325,7 +350,7 @@ async def analyze_trade(
         league_fmt = {"ppr": 0.0, "num_qbs": 1, "num_teams": len(rosters) or 12,
                       "is_dynasty": False, "superflex": False}
         try:
-            league_result = await get_league(league_id)
+            league_result = await get_espn_league(league_id)
             if league_result.get("success") and league_result.get("league"):
                 league_fmt = league_format_from_settings(league_result["league"])
         except Exception as e:
@@ -339,36 +364,38 @@ async def analyze_trade(
         )
         values_stale = values_index.get("stale", False)
 
-        # Optional trending context (informational only; not used for value).
-        trending_ids = set()
-        if include_trending:
-            try:
-                trending_result = await get_trending_players(nfl_db, "add", 24, 50)
-                if trending_result.get("success"):
-                    for tp in trending_result.get("trending_players", []):
-                        if tp.get("player_id"):
-                            trending_ids.add(str(tp["player_id"]))
-            except Exception as e:
-                logger.warning(f"Could not fetch trending data: {e}")
-
         # Initialize analyzer
         analyzer = TradeAnalyzer()
 
+        # Reconstruct each team's enriched player list from raw ESPN roster
+        # entries (ADR 0007), then derive starters from lineupSlotId: a roster
+        # entry is a starter iff its slot isn't bench (20) or IR (21).
+        team1_entries = (team1_roster.get("roster") or {}).get("entries") or []
+        team2_entries = (team2_roster.get("roster") or {}).get("entries") or []
+        team1_players_enriched = enrich_roster(team1_entries, nfl_db)
+        team2_players_enriched = enrich_roster(team2_entries, nfl_db)
+
+        def _starters(players_enriched: list[dict]) -> list[dict]:
+            return [p for p in players_enriched if p.get("lineup_slot_id") not in (BENCH_SLOT_ID, IR_SLOT_ID)]
+
         # Calculate positional needs
-        team1_needs = analyzer._calculate_positional_needs(team1_roster)
-        team2_needs = analyzer._calculate_positional_needs(team2_roster)
+        team1_needs = analyzer._calculate_positional_needs({
+            "players_enriched": team1_players_enriched,
+            "starters_enriched": _starters(team1_players_enriched),
+        })
+        team2_needs = analyzer._calculate_positional_needs({
+            "players_enriched": team2_players_enriched,
+            "starters_enriched": _starters(team2_players_enriched),
+        })
 
         # Enrich and calculate values for players being traded
-        team1_gives_enriched = []
-        team2_gives_enriched = []
-
-        team1_players = {p.get("player_id"): p for p in team1_roster.get("players_enriched", [])}
-        team2_players = {p.get("player_id"): p for p in team2_roster.get("players_enriched", [])}
+        team1_players = {str(p.get("player_id")): p for p in team1_players_enriched}
+        team2_players = {str(p.get("player_id")): p for p in team2_players_enriched}
 
         def _enrich_gives(give_ids, roster_players):
             out = []
             for player_id in give_ids:
-                player = roster_players.get(player_id)
+                player = roster_players.get(str(player_id))
                 if not player:
                     logger.warning(f"Player {player_id} not found in roster")
                     player = {"player_id": player_id, "full_name": f"Unknown ({player_id})", "position": ""}
@@ -386,7 +413,6 @@ async def analyze_trade(
                 player["value_source"] = value_source
                 player["overall_rank"] = (market or {}).get("overall_rank")
                 player["position_rank"] = (market or {}).get("position_rank")
-                player["is_trending"] = str(player_id) in trending_ids
                 out.append(player)
             return out
 
@@ -446,7 +472,6 @@ async def analyze_trade(
                 "value_source": p.get("value_source"),
                 "overall_rank": p.get("overall_rank"),
                 "position_rank": p.get("position_rank"),
-                "is_trending": p.get("is_trending", False),
             }
 
         return create_success_response({
@@ -461,13 +486,13 @@ async def analyze_trade(
             "value_source": values_index.get("source"),
             "values_stale": values_stale,
             "team1_analysis": {
-                "roster_id": team1_roster_id,
+                "team_id": team1_id,
                 "gives": [_fmt(p) for p in team1_gives_enriched],
                 "receives": [_fmt(p) for p in team2_gives_enriched],
                 "positional_needs": team1_needs
             },
             "team2_analysis": {
-                "roster_id": team2_roster_id,
+                "team_id": team2_id,
                 "gives": [_fmt(p) for p in team2_gives_enriched],
                 "receives": [_fmt(p) for p in team1_gives_enriched],
                 "positional_needs": team2_needs
