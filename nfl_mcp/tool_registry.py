@@ -920,7 +920,7 @@ async def get_playoff_odds(
     current_week: int | None = None,
     num_sims: int | None = 10000,
     score_sd: float | None = 25.0,
-    my_roster_id: int | None = None,
+    team_id: int | None = None,
     seed: int | None = None,
 ) -> dict:
     """Compute playoff probabilities via Monte-Carlo of the rest of the season.
@@ -930,13 +930,13 @@ async def get_playoff_odds(
     often each team makes a playoff seed.
 
     Parameters:
-        league_id (str, required): Sleeper league id.
-        current_week (int, optional): First unplayed week (defaults to NFL state).
+        league_id (str, required): ESPN league id.
+        current_week (int, optional): First unplayed week (defaults to current NFL week).
         num_sims (int): Iterations (default 10000, capped 100..50000).
         score_sd (float): Weekly scoring std-dev (default 25).
-        my_roster_id (int, optional): Also returns your win/lose-this-week swing.
+        team_id (int, optional): Also returns your win/lose-this-week swing.
         seed (int, optional): RNG seed for reproducibility.
-    Returns: {odds:[{roster_id, name, record, mean_ppg, playoff_pct, avg_seed}],
+    Returns: {odds:[{team_id, name, record, mean_ppg, playoff_pct, avg_seed}],
               this_week_swing?, playoff_teams, current_week, success}
 
     IMPORTANT FOR LLM AGENTS: Render the odds immediately without asking for confirmation.
@@ -945,13 +945,13 @@ async def get_playoff_odds(
         league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
         if current_week is not None:
             current_week = validate_numeric_input(current_week, min_val=1, max_val=22, required=False)
-        if my_roster_id is not None:
-            my_roster_id = validate_numeric_input(my_roster_id, min_val=1, max_val=32, required=False)
+        if team_id is not None:
+            team_id = validate_numeric_input(team_id, min_val=1, max_val=32, required=False)
     except ValueError as e:
         return {"odds": [], "success": False, "error": f"Invalid input: {e!s}"}
     return await playoff_tools.get_playoff_odds(
         league_id=league_id, current_week=current_week, num_sims=num_sims or 10000,
-        score_sd=score_sd or 25.0, my_roster_id=my_roster_id, seed=seed, db=get_db(),
+        score_sd=score_sd or 25.0, team_id=team_id, seed=seed, db=get_db(),
     )
 
 
@@ -1532,7 +1532,7 @@ async def get_opportunity_projections(
 @timing_decorator("analyze_opponent", tool_type="opponent_analysis")
 async def analyze_opponent(
     league_id: str,
-    opponent_roster_id: int,
+    opponent_team_id: int,
     current_week: int | None = None
 ) -> dict:
     """Analyze an opponent's roster to identify weaknesses and exploitation opportunities.
@@ -1542,8 +1542,8 @@ async def analyze_opponent(
     depth chart weakness analysis, and strategic exploitation recommendations.
 
     Parameters:
-        league_id (str, required): The unique identifier for the fantasy league.
-        opponent_roster_id (int, required): Roster ID of the opponent to analyze.
+        league_id (str, required): The ESPN fantasy league id.
+        opponent_team_id (int, required): ESPN team id of the opponent to analyze.
         current_week (int, optional): Current NFL week for matchup context.
 
     Returns: {
@@ -1560,7 +1560,7 @@ async def analyze_opponent(
 
     Example: analyze_opponent(
         league_id="12345",
-        opponent_roster_id=2,
+        opponent_team_id=2,
         current_week=10
     )
 
@@ -1569,15 +1569,16 @@ async def analyze_opponent(
     """
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
-        opponent_roster_id = validate_numeric_input(opponent_roster_id, min_val=1, max_val=20, required=True)
+        opponent_team_id = validate_numeric_input(opponent_team_id, min_val=1, max_val=20, required=True)
 
         if current_week is not None:
             current_week = validate_numeric_input(current_week, min_val=1, max_val=22, required=False)
 
         return await opponent_analysis_tools.analyze_opponent(
             league_id=league_id,
-            opponent_roster_id=opponent_roster_id,
-            current_week=current_week
+            opponent_team_id=opponent_team_id,
+            current_week=current_week,
+            db=get_db(),
         )
     except ValueError as e:
         return {
