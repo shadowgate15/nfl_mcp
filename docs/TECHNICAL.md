@@ -109,9 +109,23 @@ async with Client("http://localhost:9000/mcp/") as client:
     print(await client.call_tool("get_player_values", {"scoring": "ppr"}))
 ```
 
-**Point it at your Sleeper league:** ask your assistant *"My Sleeper username is
-`your_name` — find my 2026 leagues"* (runs `get_user` → `get_user_leagues`), or
-read the `league_id` from the app URL `sleeper.com/leagues/<league_id>/...`.
+**Point it at your ESPN league:** every league-scoped tool (`get_espn_league`,
+`get_espn_rosters`, `get_espn_draft`, `recommend_draft_pick`, waivers, trades, …)
+needs `ESPN_S2`/`ESPN_SWID` session cookies, since ESPN's fantasy API requires a
+real login even for public leagues — there's no Sleeper-style "just give us a
+username." Pull them once with the bundled script (ADR 0002):
+
+```bash
+uv sync --group espn                        # installs Playwright + browser binary
+uv run python scripts/espn_cookie_pull.py   # opens a real browser; log in by hand
+# writes ESPN_S2=... / ESPN_SWID=... into repo-root .env (merges, doesn't overwrite)
+```
+
+Then load `.env` into wherever the server runs (`--env-file .env` for Docker, or
+`export $(cat .env | xargs)` locally) and ask your assistant *"My ESPN league id
+is `1234567` — show my roster."* Find `league_id` in the app/website URL:
+`fantasy.espn.com/football/league?leagueId=<league_id>`. Cookies expire
+periodically — an expired-cookie error means rerun the script.
 
 ### Live draft CLIs (`evals.live`)
 
@@ -134,6 +148,7 @@ variables take precedence.
 | Variable | Meaning |
 |---|---|
 | `ODDS_API_KEY` | Enables live Vegas lines/totals ([the-odds-api.com](https://the-odds-api.com)). Without it, Vegas tools return neutral placeholders. Player values (FantasyCalc) need **no** key. |
+| `ESPN_S2`, `ESPN_SWID` | ESPN Fantasy session cookies, required by every league-scoped `get_espn_*`/draft/waiver/trade tool. Written by `scripts/espn_cookie_pull.py` (ADR 0002); read via plain `os.getenv`, no dotenv auto-loading. |
 | `NFL_MCP_ADVANCED_ENRICH` | `1` enables snap%, opponent, practice status and usage-trend enrichment (Schema v8). Also lets schedule fetches run. |
 | `NFL_MCP_DB_PATH` | Path to the SQLite cache file (default `nfl_data.db`, relative to the working dir). Point it at a mounted volume — e.g. `/data/nfl_data.db` — to persist the warmed cache across restarts. |
 | `NFL_MCP_ALLOW_PRIVATE_URLS` | `1` lets `crawl_url` reach private/loopback addresses. Off by default (SSRF protection — see [SECURITY.md](../SECURITY.md)). |
@@ -179,7 +194,8 @@ nfl_mcp/
 │   ├── streaming_tools.py   # Weekly DST/K/QB/TE streaming planner
 │   ├── weather_tools.py     # Open-Meteo wind/weather + fantasy impact
 │   ├── vegas_tools.py       # The Odds API lines / implied totals
-│   ├── sleeper_tools.py     # Sleeper league/roster/draft/transactions + enrichment
+│   ├── espn_fantasy_tools.py # ESPN league/roster/draft/transactions (needs ESPN_S2/ESPN_SWID)
+│   ├── nfl_enrichment.py    # ESPN-core leaf helpers (snap%, opponent, practice status, usage)
 │   └── ...                  # values, waivers, trade, injuries, coaching, cbs, ...
 ├── tests/                  # ~850 tests (unit; live tests gated behind --run-live)
 ├── evals/                  # 3-layer eval suite (see below)
@@ -199,9 +215,9 @@ Design principles:
 
 | Source | Used for | Key? |
 |---|---|---|
-| **Sleeper** | Your live league: leagues, rosters, drafts, transactions, trending, NFL state, players map | No |
+| **ESPN Fantasy** | Your live league: settings, rosters, standings, matchups, draft, transactions, free agents | `ESPN_S2`/`ESPN_SWID` cookies (see above) |
+| **ESPN (core)** | News, teams, depth charts, injuries, standings, schedules, league leaders | No |
 | **nflverse** | Real weekly player stats → defense-vs-position, offense strength, backtests | No |
-| **ESPN** | News, teams, depth charts, injuries, standings, schedules, league leaders | No |
 | **FantasyCalc** | Market-consensus player values (trades, draft board), format-aware | No |
 | **CBS Sports** | Player news, projections, expert picks | No |
 | **Open-Meteo** | Per-game wind/precipitation/temperature (weather tool) | No |
@@ -216,14 +232,6 @@ Design principles:
   `usage_last_3_weeks` (targets/routes/rz_touches/snap_share averages),
   `usage_source`, and `usage_trend` (up/down/flat, 15% threshold).
 
-### Robustness & snapshots
-
-Robust endpoints (`get_rosters`, `get_transactions`, `get_matchups`) retry with
-backoff and, on total failure, return the most recent cached snapshot with
-`success=false` but usable data. Snapshot metadata: `retries_used`, `stale`,
-`failure_reason`, `snapshot_fetched_at`, `snapshot_age_seconds` (present but
-`null` on a fresh success).
-
 ## Eval suite (`evals/`)
 
 A three-layer suite that keeps the intelligence honest:
@@ -233,8 +241,9 @@ A three-layer suite that keeps the intelligence honest:
   real nflverse outcomes (MAE/RMSE/Spearman). Imports the live constants so it
   grades production. Scheduled, non-blocking `evals.yml`.
 - **Layer B — data-source contracts** (`evals/contracts/`): a daily
-  `contracts.yml` watchdog that asserts the fields we depend on (`sleeperId`,
-  `off_snp`, `opponent_team`, …) still exist upstream.
+  `contracts.yml` watchdog that asserts the fields we depend on (ESPN Fantasy's
+  `league.settings.rosterSettings`, `players[].fullName`/`defaultPositionId`,
+  nflverse's `ppr`/`touches`, …) still exist upstream.
 - **Layer C — agent tool-routing** (`evals/agent/`): scenarios mapping realistic
   prompts to the tool(s) an assistant should call; offline guards run in CI.
 

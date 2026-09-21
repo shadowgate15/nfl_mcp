@@ -1,13 +1,18 @@
 # Draft-Day Playbook
 
 How to actually draft with this server — before, during, and how to read what it
-tells you. Distilled from a full live run against a real Sleeper draft (the
-worked example in §5 predates the ESPN cutover; the commands throughout are
-current).
+tells you. Distilled from a full live draft run (the worked example in §5
+predates the ESPN cutover and ran against Sleeper's UI; the commands and flow
+throughout are current for ESPN).
 
 > TL;DR: **rounds 1–8, follow the tool** (value / VBD, cliffs, runs, "elite scarce
 > position early or wait on QB"). **Bench rounds, your judgment takes over**
 > (RB/WR depth + handcuffs, byes) — pure value goes blind on deep benches.
+
+> **Before any of this works:** ESPN's draft/league tools need `ESPN_S2`/`ESPN_SWID`
+> session cookies (ESPN has no Sleeper-style anonymous username lookup). One-time:
+> `uv sync --group espn && uv run python scripts/espn_cookie_pull.py`. See
+> [docs/TECHNICAL.md](TECHNICAL.md#going-live-connect-your-ai-client).
 
 ---
 
@@ -110,8 +115,9 @@ depth/handcuff overlay.
 For the weekly tools that build on the draft (projections, start/sit, FAAB), run
 the server with:
 ```bash
+--env-file .env                # ESPN_S2 / ESPN_SWID from the cookie-pull script
 -e NFL_MCP_ADVANCED_ENRICH=1   # real snap%/usage enrichment
 -e NFL_MCP_PREFETCH=1          # warm caches
 -e ODDS_API_KEY=...            # live Vegas game environment (optional)
 ```
-See the main [README](../README.md#-going-live--use-it-from-your-ai-client).
+See [docs/TECHNICAL.md](TECHNICAL.md#going-live-connect-your-ai-client).
