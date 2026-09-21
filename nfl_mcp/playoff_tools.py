@@ -6,19 +6,24 @@ regular-season matchup thousands of times (each team scores ~ Normal(its
 points-per-game, sd)), rank by record then points, and count how often each team
 lands in a playoff seed.
 
-Team strength defaults to season points-per-game (from Sleeper roster totals),
-which is a simple, robust estimate; when the season hasn't produced enough games
-it falls back to the league average.
+Team strength defaults to season points-per-game (from ESPN's
+`team.record.overall.pointsFor`), which is a simple, robust estimate; when the
+season hasn't produced enough games it falls back to the league average.
 """
 
 from __future__ import annotations
 
 import logging
 import random
-from typing import Any
 
 from .errors import ErrorType, create_error_response, create_success_response, handle_http_errors
-from .sleeper_tools import get_league, get_league_users, get_matchups, get_nfl_state, get_rosters
+from .espn_fantasy_tools import (
+    get_espn_league,
+    get_espn_matchups,
+    get_espn_rosters,
+    resolve_team_owner_names,
+)
+from .nfl_enrichment import get_current_nfl_week
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +40,13 @@ def _simulate(
     teams: list[dict], schedule: list[tuple[int, int]], playoff_teams: int,
     num_sims: int, score_sd: float, rng: random.Random,
 ) -> dict[int, dict[str, float]]:
-    """Monte-Carlo the remaining schedule. teams: [{roster_id, wins, points, mean}]."""
-    made = {t["roster_id"]: 0 for t in teams}
-    seed_sum = {t["roster_id"]: 0 for t in teams}
-    ids = [t["roster_id"] for t in teams]
-    base_w = {t["roster_id"]: t["wins"] for t in teams}
-    base_p = {t["roster_id"]: t["points"] for t in teams}
-    mean = {t["roster_id"]: t["mean"] for t in teams}
+    """Monte-Carlo the remaining schedule. teams: [{team_id, wins, points, mean}]."""
+    made = {t["team_id"]: 0 for t in teams}
+    seed_sum = {t["team_id"]: 0 for t in teams}
+    ids = [t["team_id"] for t in teams]
+    base_w = {t["team_id"]: t["wins"] for t in teams}
+    base_p = {t["team_id"]: t["points"] for t in teams}
+    mean = {t["team_id"]: t["mean"] for t in teams}
 
     for _ in range(num_sims):
         w = dict(base_w)
@@ -55,38 +60,44 @@ def _simulate(
                 w[a] += 1
             else:
                 w[b] += 1
-        order = sorted(ids, key=lambda rid: _rank_key(w[rid], p[rid]), reverse=True)
-        for seed, rid in enumerate(order[:playoff_teams], 1):
-            made[rid] += 1
-            seed_sum[rid] += seed
+        order = sorted(ids, key=lambda tid: _rank_key(w[tid], p[tid]), reverse=True)
+        for seed, tid in enumerate(order[:playoff_teams], 1):
+            made[tid] += 1
+            seed_sum[tid] += seed
 
     out = {}
-    for rid in ids:
-        m = made[rid]
-        out[rid] = {
+    for tid in ids:
+        m = made[tid]
+        out[tid] = {
             "playoff_pct": round(m / num_sims * 100, 1),
-            "avg_seed": round(seed_sum[rid] / m, 2) if m else None,
+            "avg_seed": round(seed_sum[tid] / m, 2) if m else None,
         }
     return out
 
 
 async def _build_remaining_schedule(league_id: str, weeks: list[int]) -> list[tuple[int, int]]:
-    """Reconstruct roster-vs-roster pairings for the given weeks from Sleeper matchups."""
+    """Reconstruct team-vs-team pairings for the given weeks from ESPN matchups.
+
+    ESPN's `schedule[]` entries are already home/away-paired (unlike Sleeper's
+    matchup_id-grouped rows), so each entry maps directly to a `(home teamId,
+    away teamId)` tuple. A missing `home` or `away` key means a bye week
+    (docs/ESPN_FANTASY_ENDPOINT_CATALOG.md §3) and is skipped.
+    """
     schedule: list[tuple[int, int]] = []
     for wk in weeks:
-        res = await get_matchups(league_id, wk)
+        res = await get_espn_matchups(league_id, week=wk)
         if not res.get("success"):
             continue
-        by_mid: dict[Any, list[int]] = {}
         for m in res.get("matchups", []):
-            mid = m.get("matchup_id")
-            rid = m.get("roster_id")
-            if mid is None or rid is None:
+            home = m.get("home")
+            away = m.get("away")
+            if not home or not away:
                 continue
-            by_mid.setdefault(mid, []).append(rid)
-        for rids in by_mid.values():
-            if len(rids) == 2:
-                schedule.append((rids[0], rids[1]))
+            home_id = home.get("teamId")
+            away_id = away.get("teamId")
+            if home_id is None or away_id is None:
+                continue
+            schedule.append((home_id, away_id))
     return schedule
 
 
@@ -96,66 +107,61 @@ async def get_playoff_odds(
     current_week: int | None = None,
     num_sims: int = 10000,
     score_sd: float = DEFAULT_SCORE_SD,
-    my_roster_id: int | None = None,
+    team_id: int | None = None,
     seed: int | None = None,
     db=None,
 ) -> dict:
     """Compute playoff probabilities by simulating the rest of the regular season.
 
     Args:
-        league_id: Sleeper league id.
-        current_week: First not-yet-played week (defaults to NFL state / inferred).
+        league_id: ESPN league id.
+        current_week: First not-yet-played week (defaults to
+            nfl_enrichment.get_current_nfl_week() / inferred).
         num_sims: Monte-Carlo iterations (default 10000).
         score_sd: Weekly scoring standard deviation (default 25).
-        my_roster_id: If given, also returns your win-this-week vs lose-this-week swing.
+        team_id: If given, also returns your win-this-week vs lose-this-week swing.
         seed: RNG seed for reproducibility.
 
-    Returns: {odds: [{roster_id, name, record, mean_ppg, playoff_pct, avg_seed}], ...}
+    Returns: {odds: [{team_id, name, record, mean_ppg, playoff_pct, avg_seed}], ...}
     """
-    league_res = await get_league(league_id)
+    league_res = await get_espn_league(league_id)
     if not league_res.get("success") or not league_res.get("league"):
         return create_error_response(f"Could not load league: {league_res.get('error')}",
                                      ErrorType.HTTP, {"odds": []})
     league = league_res["league"]
     settings = league.get("settings", {}) or {}
-    playoff_teams = int(settings.get("playoff_teams", DEFAULT_PLAYOFF_TEAMS) or DEFAULT_PLAYOFF_TEAMS)
-    playoff_week_start = int(settings.get("playoff_week_start", DEFAULT_PLAYOFF_WEEK_START) or DEFAULT_PLAYOFF_WEEK_START)
+    schedule_settings = settings.get("scheduleSettings", {}) or {}
+    playoff_teams = int(schedule_settings.get("playoffTeamCount", DEFAULT_PLAYOFF_TEAMS) or DEFAULT_PLAYOFF_TEAMS)
+    matchup_period_count = schedule_settings.get("matchupPeriodCount")
+    playoff_week_start = int(matchup_period_count) + 1 if matchup_period_count else DEFAULT_PLAYOFF_WEEK_START
     regular_weeks = playoff_week_start - 1
 
-    rosters_res = await get_rosters(league_id)
+    rosters_res = await get_espn_rosters(league_id)
     if not rosters_res.get("success"):
         return create_error_response(f"Could not load rosters: {rosters_res.get('error')}",
                                      ErrorType.HTTP, {"odds": []})
     rosters = rosters_res.get("rosters", [])
+    members = rosters_res.get("members", [])
 
-    # names
-    names = {}
-    try:
-        users_res = await get_league_users(league_id)
-        user_names = {u.get("user_id"): (u.get("display_name") or u.get("metadata", {}).get("team_name"))
-                      for u in (users_res.get("users", []) if users_res.get("success") else [])}
-        for r in rosters:
-            names[r.get("roster_id")] = user_names.get(r.get("owner_id")) or f"Roster {r.get('roster_id')}"
-    except Exception:
-        pass
+    names = resolve_team_owner_names(rosters, members)
 
     # Build teams with current record + season scoring
     teams = []
     total_ppg = 0.0
     counted = 0
     for r in rosters:
-        s = r.get("settings", {}) or {}
-        wins = float(s.get("wins", 0) or 0)
-        losses = float(s.get("losses", 0) or 0)
-        ties = float(s.get("ties", 0) or 0)
+        record = (r.get("record") or {}).get("overall", {}) or {}
+        wins = float(record.get("wins", 0) or 0)
+        losses = float(record.get("losses", 0) or 0)
+        ties = float(record.get("ties", 0) or 0)
         games = wins + losses + ties
-        fpts = float(s.get("fpts", 0) or 0) + float(s.get("fpts_decimal", 0) or 0) / 100.0
+        fpts = float(record.get("pointsFor", 0) or 0)
         mean = (fpts / games) if games > 0 else None
         if mean is not None:
             total_ppg += mean
             counted += 1
         teams.append({
-            "roster_id": r.get("roster_id"),
+            "team_id": r.get("id"),
             "wins": wins + 0.5 * ties,   # ties count as half a win for ranking
             "points": fpts,
             "games": games,
@@ -170,8 +176,7 @@ async def get_playoff_odds(
     # current week
     if current_week is None:
         try:
-            state = await get_nfl_state()
-            current_week = int(state.get("nfl_state", {}).get("week")) if state.get("success") else None
+            current_week = await get_current_nfl_week()
         except Exception:
             current_week = None
     if not current_week or current_week < 1:
@@ -182,7 +187,7 @@ async def get_playoff_odds(
     schedule = await _build_remaining_schedule(league_id, remaining_weeks) if remaining_weeks else []
 
     # No remaining games (e.g. preseason / schedule not published) -> the sim
-    # would otherwise emit a deterministic 100/0 split by roster id. Flag it.
+    # would otherwise emit a deterministic 100/0 split by team id. Flag it.
     if not schedule:
         return create_success_response({
             "odds": [],
@@ -200,14 +205,14 @@ async def get_playoff_odds(
 
     odds = []
     for t in teams:
-        rid = t["roster_id"]
+        tid = t["team_id"]
         odds.append({
-            "roster_id": rid,
-            "name": names.get(rid, f"Roster {rid}"),
+            "team_id": tid,
+            "name": names.get(tid, f"Team {tid}"),
             "record": t["record"],
             "mean_ppg": round(t["mean"], 1),
-            "playoff_pct": sim[rid]["playoff_pct"],
-            "avg_seed": sim[rid]["avg_seed"],
+            "playoff_pct": sim[tid]["playoff_pct"],
+            "avg_seed": sim[tid]["avg_seed"],
         })
     odds.sort(key=lambda x: x["playoff_pct"], reverse=True)
 
@@ -223,28 +228,28 @@ async def get_playoff_odds(
     }
 
     # Optional: win-this-week vs lose-this-week swing for one team.
-    if my_roster_id is not None and schedule:
-        my_game = next(((a, b) for (a, b) in schedule if my_roster_id in (a, b)), None)
+    if team_id is not None and schedule:
+        my_game = next(((a, b) for (a, b) in schedule if team_id in (a, b)), None)
         if my_game:
-            opp = my_game[1] if my_game[0] == my_roster_id else my_game[0]
+            opp = my_game[1] if my_game[0] == team_id else my_game[0]
             rest = [g for g in schedule if g != my_game]
 
-            def _clone(win_rid):
+            def _clone(win_id):
                 cloned = []
                 for t in teams:
                     c = dict(t)
-                    if c["roster_id"] == win_rid:
+                    if c["team_id"] == win_id:
                         c["wins"] = c["wins"] + 1
                     cloned.append(c)
                 return cloned
 
-            win_sim = _simulate(_clone(my_roster_id), rest, playoff_teams, 5000, score_sd, random.Random(seed))
+            win_sim = _simulate(_clone(team_id), rest, playoff_teams, 5000, score_sd, random.Random(seed))
             lose_sim = _simulate(_clone(opp), rest, playoff_teams, 5000, score_sd, random.Random(seed))
             result["this_week_swing"] = {
-                "my_roster_id": my_roster_id,
-                "opponent_roster_id": opp,
-                "if_win_pct": win_sim[my_roster_id]["playoff_pct"],
-                "if_lose_pct": lose_sim[my_roster_id]["playoff_pct"],
+                "team_id": team_id,
+                "opponent_team_id": opp,
+                "if_win_pct": win_sim[team_id]["playoff_pct"],
+                "if_lose_pct": lose_sim[team_id]["playoff_pct"],
             }
 
     return create_success_response(result)

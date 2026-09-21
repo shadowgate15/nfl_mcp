@@ -8,11 +8,23 @@ exploitation recommendations.
 
 import logging
 from collections import defaultdict
+from datetime import datetime
 
 from .errors import ErrorType, create_error_response, create_success_response
-from .sleeper_tools import get_league_users, get_matchups, get_rosters
+from .espn_fantasy_tools import (
+    POSITION_ID_MAP,
+    get_espn_matchups,
+    get_espn_rosters,
+    resolve_team_owner_names,
+)
+from .nfl_enrichment import _enrich_usage_and_opponent
 
 logger = logging.getLogger(__name__)
+
+# ESPN's well-known lineupSlotId values for non-starting slots — every other
+# slot id is a starting lineup spot.
+_BENCH_LINEUP_SLOT_ID = 20
+_IR_LINEUP_SLOT_ID = 21
 
 
 class OpponentAnalyzer:
@@ -308,8 +320,7 @@ class OpponentAnalyzer:
                 "position_assessments": {},
                 "starter_weaknesses": [],
                 "exploitation_strategies": [],
-                "roster_id": opponent_roster.get("roster_id"),
-                "owner_id": opponent_roster.get("owner_id"),
+                "team_id": opponent_roster.get("team_id"),
                 "message": "Opponent roster is empty (not drafted yet) — nothing to analyze.",
             }
 
@@ -357,15 +368,73 @@ class OpponentAnalyzer:
             "position_assessments": position_assessments,
             "starter_weaknesses": starter_weaknesses,
             "exploitation_strategies": strategies,
-            "roster_id": opponent_roster.get("roster_id"),
-            "owner_id": opponent_roster.get("owner_id")
+            "team_id": opponent_roster.get("team_id")
         }
+
+
+def _build_enriched_players(
+    entries: list[dict], db, season: int, current_week: int | None
+) -> tuple[list[dict], list[dict]]:
+    """
+    Turn `get_espn_rosters`' (summary-trimmed) roster entries into the
+    enriched player lists `OpponentAnalyzer.analyze_opponent_roster` expects.
+
+    Per-player identity comes from the ESPN player-identity cache (`db`,
+    keyed by ESPN player id per ADR 0005) when available, falling back to the
+    roster entry's own `fullName`/`defaultPositionId`. Usage/injury/matchup
+    richness (`snap_pct`, `practice_status`, `usage_trend_overall`, ...) comes
+    from `nfl_enrichment._enrich_usage_and_opponent`, the shared leaf helper
+    every other Sleeper-to-ESPN-cut-over enrichment path already uses.
+
+    Returns `(players_enriched, starters_enriched)` — starters are every
+    entry not sitting in ESPN's bench/IR lineup slots.
+    """
+    player_ids = [str(entry["playerId"]) for entry in entries if entry.get("playerId") is not None]
+    player_cache = db.get_athletes_by_ids(player_ids) if db and player_ids else {}
+
+    players_enriched: list[dict] = []
+    starters_enriched: list[dict] = []
+
+    for entry in entries:
+        player_id = entry.get("playerId")
+        if player_id is None:
+            continue
+
+        cached = player_cache.get(str(player_id)) or {}
+        full_name = cached.get("full_name") or entry.get("fullName")
+        position = cached.get("position") or POSITION_ID_MAP.get(entry.get("defaultPositionId"), "")
+
+        athlete_for_enrichment = {
+            "id": player_id,
+            "player_id": player_id,
+            "full_name": full_name,
+            "name": full_name,
+            "position": position,
+            "team": cached.get("team"),
+            "team_id": cached.get("team_id"),
+            "raw": cached.get("raw"),
+        }
+        extra = _enrich_usage_and_opponent(db, athlete_for_enrichment, season, current_week)
+
+        player_obj = {
+            "player_id": player_id,
+            "full_name": full_name,
+            "position": position,
+            **extra,
+        }
+        players_enriched.append(player_obj)
+
+        if entry.get("lineupSlotId") not in (_BENCH_LINEUP_SLOT_ID, _IR_LINEUP_SLOT_ID):
+            starters_enriched.append(player_obj)
+
+    return players_enriched, starters_enriched
 
 
 async def analyze_opponent(
     league_id: str,
-    opponent_roster_id: int,
-    current_week: int | None = None
+    opponent_team_id: int,
+    current_week: int | None = None,
+    db=None,
 ) -> dict:
     """
     Analyze an opponent's roster to identify weaknesses and exploitation opportunities.
@@ -378,9 +447,11 @@ async def analyze_opponent(
     - Strategic recommendations for exploitation
 
     Args:
-        league_id: The unique identifier for the fantasy league
-        opponent_roster_id: Roster ID of the opponent to analyze
+        league_id: The ESPN fantasy league id
+        opponent_team_id: ESPN team id of the opponent to analyze
         current_week: Optional current NFL week for matchup context
+        db: NFLDatabase instance for player-identity/enrichment lookups
+            (injected by the tool registry)
 
     Returns:
         A dictionary containing:
@@ -390,6 +461,7 @@ async def analyze_opponent(
         - starter_weaknesses: Specific weaknesses in starting lineup
         - exploitation_strategies: Prioritized recommendations
         - matchup_context: Optional matchup information if current_week provided
+        - opponent_name: The resolved display name of the opponent's owner
         - success: Whether the analysis was successful
         - error: Error message (if any)
 
@@ -405,15 +477,15 @@ async def analyze_opponent(
                 {"vulnerability_score": 0}
             )
 
-        if opponent_roster_id is None:
+        if opponent_team_id is None:
             return create_error_response(
-                "opponent_roster_id is required",
+                "opponent_team_id is required",
                 ErrorType.VALIDATION,
                 {"vulnerability_score": 0}
             )
 
         # Fetch league rosters
-        rosters_result = await get_rosters(league_id)
+        rosters_result = await get_espn_rosters(league_id)
         if not rosters_result.get("success"):
             return create_error_response(
                 f"Failed to fetch rosters: {rosters_result.get('error')}",
@@ -422,52 +494,67 @@ async def analyze_opponent(
             )
 
         rosters = rosters_result.get("rosters", [])
+        members = rosters_result.get("members", [])
 
-        # Find the opponent's roster
+        # Find the opponent's team
         opponent_roster = None
-        for roster in rosters:
-            if roster.get("roster_id") == opponent_roster_id:
-                opponent_roster = roster
+        for team in rosters:
+            if team.get("id") == opponent_team_id:
+                opponent_roster = team
                 break
 
         if not opponent_roster:
             return create_error_response(
-                f"Roster with ID {opponent_roster_id} not found",
+                f"Team with ID {opponent_team_id} not found",
                 ErrorType.VALIDATION,
                 {"vulnerability_score": 0}
             )
 
-        # Get opponent owner information
-        users_result = await get_league_users(league_id)
-        opponent_name = None
-        if users_result.get("success"):
-            users = users_result.get("users", [])
-            owner_id = opponent_roster.get("owner_id")
-            for user in users:
-                if user.get("user_id") == owner_id:
-                    opponent_name = user.get("display_name") or user.get("username")
-                    break
+        # Resolve opponent owner name (no co-manager list — see resolve_team_owner_names)
+        owner_names = resolve_team_owner_names(rosters, members)
+        opponent_name = owner_names.get(opponent_team_id)
+
+        # Build enriched player lists from the ESPN roster entries
+        entries = ((opponent_roster.get("roster") or {}).get("entries")) or []
+        players_enriched, starters_enriched = _build_enriched_players(
+            entries, db, datetime.now().year, current_week
+        )
 
         # Initialize analyzer
         analyzer = OpponentAnalyzer()
 
         # Perform analysis
-        analysis = analyzer.analyze_opponent_roster(opponent_roster)
+        analysis = analyzer.analyze_opponent_roster({
+            "team_id": opponent_roster.get("id"),
+            "players_enriched": players_enriched,
+            "starters_enriched": starters_enriched,
+        })
 
         # Add matchup context if week provided
         matchup_context = None
         if current_week:
             try:
-                matchups_result = await get_matchups(league_id, current_week)
+                matchups_result = await get_espn_matchups(league_id, week=current_week)
                 if matchups_result.get("success"):
-                    matchups = matchups_result.get("matchups", [])
-                    for matchup in matchups:
-                        if matchup.get("roster_id") == opponent_roster_id:
+                    schedule = matchups_result.get("matchups", [])
+                    for matchup in schedule:
+                        home = matchup.get("home")
+                        away = matchup.get("away")
+                        side = None
+                        if home and home.get("teamId") == opponent_team_id:
+                            side = home
+                        elif away and away.get("teamId") == opponent_team_id:
+                            side = away
+                        if side is not None:
                             matchup_context = {
                                 "week": current_week,
-                                "matchup_id": matchup.get("matchup_id"),
-                                "points": matchup.get("points"),
-                                "projected_points": matchup.get("custom_points")
+                                "matchup_id": matchup.get("id"),
+                                "points": side.get("totalPoints"),
+                                # ESPN only populates totalProjectedPointsLive once a
+                                # week is underway — absent outside that window, so
+                                # this naturally degrades to None rather than a
+                                # fabricated value.
+                                "projected_points": side.get("totalProjectedPointsLive"),
                             }
                             break
             except Exception as e:
@@ -487,6 +574,6 @@ async def analyze_opponent(
         logger.exception(f"Error analyzing opponent: {e}")
         return create_error_response(
             f"Unexpected error during opponent analysis: {e!s}",
-            ErrorType.INTERNAL,
+            ErrorType.UNEXPECTED,
             {"vulnerability_score": 0}
         )
